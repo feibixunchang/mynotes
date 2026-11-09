@@ -33,7 +33,7 @@ Future<void> main() async {
   // 已运行的实例会把自己显示到前台（等于双击图标唤出窗口）。
   // 自测模式（无界面）不参与抢锁，避免和正在使用的实例互相打架。
   final selfTestMode = Platform.environment['MYNOTES_SELFTEST'] == '1';
-  if (!selfTestMode && !SingleInstance.i.acquireSync()) {
+  if (!selfTestMode && !await SingleInstance.i.acquire()) {
     exit(0);
   }
 
@@ -144,9 +144,9 @@ Future<void> main() async {
   window?.show();
   window?.focus();
 
-  // 再双击一次图标（第二个实例被拦下后会写唤醒信号）：把自己拉回前台，
+  // 再双击一次图标：已有实例会收到唤醒请求，把自己拉回前台，
   // 即使当前是「关到托盘」的隐藏状态也能唤出。
-  SingleInstance.i.watchForActivate(() {
+  SingleInstance.i.setActivateHandler(() {
     window?.show();
     window?.focus();
   });
@@ -170,6 +170,8 @@ Future<void> main() async {
     // 关闭窗口一律最小化到托盘（真正的「退出」由托盘菜单完成，
     // 那边直接 DestroyWindow，不会被这里拦截）。
     if (event is na.WindowCloseRequestedEvent) {
+      // 只有点击窗口的「关闭」按钮（WM_SYSCOMMAND/SC_CLOSE）才会走到这里；
+      // 直接 DestroyWindow 的托盘「退出」不会被拦。取消关闭后隐藏到托盘。
       saveBounds();
       event.request.cancel();
       window?.hide();

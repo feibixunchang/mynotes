@@ -1,130 +1,108 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
-/// 单实例守卫（纯 dart:io，跨平台，不依赖任何原生插件）。
+/// 单实例守卫（纯 dart:io，跨平台）。
 ///
-/// 做法：对一个固定路径的锁文件加独占锁。
-/// - 第一个进程拿到锁，并轮询「唤醒信号」文件；
-/// - 第二个进程抢锁失败 -> 写一个信号文件 -> 立即退出；
-/// - 第一个进程看到信号后把自己显示到前台并聚焦（等价于双击图标 = 唤出窗口）。
+/// 做法：在回环地址上独占一个固定端口。
+/// - 第一个进程绑定成功 -> 它就是唯一实例，并在该端口上等待「唤醒」请求；
+/// - 第二个进程绑定失败 -> 连接过去打个招呼，只要对方回 PONG（确认是同款应用），
+///   就立刻退出；对方收到招呼会把自己的窗口显示到前台。
 ///
-/// 锁随进程退出由系统自动释放，崩溃也不会留下「永远无法启动」的死锁。
+/// 为什么不用文件锁：`RandomAccessFile.lock` 在锁被占用时是**阻塞**的，
+/// 第二份会安静地卡在那里（进程还在、界面不出来），比多开更糟。
+/// 端口绑定是原子且非阻塞的，失败立刻知道。
 class SingleInstance {
   SingleInstance._();
   static final SingleInstance i = SingleInstance._();
 
-  static const String _lockName = '.instance.lock';
-  static const String _signalName = '.instance.activate';
+  static const int _basePort = 45871;
+  static const String _token = 'mynotes-single-instance';
 
-  RandomAccessFile? _raf;
-  Directory? _dir;
-  Timer? _timer;
+  int _port = _basePort;
+  ServerSocket? _server;
   bool _first = false;
+  VoidCallback? _onActivate;
 
-  /// 本进程是不是第一个实例。
   bool get isFirst => _first;
 
-  /// 锁目录：与笔记数据目录无关，保证「同一用户只有一个实例」，
-  /// 而不是「每个解压目录各跑一个」。便携版拷多份时也只允许开一个。
-  static Directory _lockDir() {
-    String? base;
-    if (Platform.isWindows) {
-      base = Platform.environment['LOCALAPPDATA'];
-      if (base == null || base.isEmpty) {
-        base = File(Platform.resolvedExecutable).parent.path;
-      }
-    } else if (Platform.isMacOS) {
-      final home = Platform.environment['HOME'];
-      base = (home == null || home.isEmpty)
-          ? Directory.systemTemp.path
-          : '$home/Library/Application Support';
-    } else {
-      final home = Platform.environment['HOME'];
-      base = (home == null || home.isEmpty)
-          ? Directory.systemTemp.path
-          : '$home/.local/share';
-    }
-    final dir = Directory('$base/MyNotesPortable');
-    try {
-      if (!dir.existsSync()) dir.createSync(recursive: true);
-    } catch (_) {}
-    return dir;
-  }
-
-  /// 同步抢锁：在 main() 最前面调用，抢不到就返回 false，调用方应立刻退出。
-  bool acquireSync() {
-    try {
-      _dir = _lockDir();
-      final lockFile = File('${_dir!.path}/$_lockName');
-      final raf = lockFile.openSync(mode: FileMode.append);
+  /// 抢实例。返回 false 表示已有实例在运行，调用方应立即退出。
+  Future<bool> acquire() async {
+    for (var i = 0; i < 6; i++) {
       try {
-        raf.lockSync(FileLock.exclusive);
-      } on FileSystemException {
-        raf.closeSync();
-        _notifyRunning();
-        return false;
-      }
-      _raf = raf;
-      _first = true;
-      _clearSignal();
-      return true;
-    } catch (e) {
-      // 目录不可写等极端情况：不阻止用户使用，退化成允许多开
-      debugPrint('single instance unavailable: $e');
-      _first = false;
-      return true;
-    }
-  }
-
-  void _clearSignal() {
-    final dir = _dir;
-    if (dir == null) return;
-    final sig = File('${dir.path}/$_signalName');
-    try {
-      if (sig.existsSync()) sig.deleteSync();
-    } catch (_) {}
-  }
-
-  /// 第二次启动时留个信号给已经在跑的实例。
-  void _notifyRunning() {
-    final dir = _dir;
-    if (dir == null) return;
-    try {
-      File('${dir.path}/$_signalName').writeAsStringSync(
-          '${DateTime.now().microsecondsSinceEpoch}',
-          flush: true);
-    } catch (_) {}
-  }
-
-  /// 第一个实例调用：收到唤醒信号时把自己拉到前台。
-  void watchForActivate(VoidCallback onActivate) {
-    if (!_first) return;
-    final dir = _dir;
-    if (dir == null) return;
-    final sig = File('${dir.path}/$_signalName');
-    _timer?.cancel();
-    _timer = Timer.periodic(const Duration(milliseconds: 700), (_) {
-      if (!sig.existsSync()) return;
-      _clearSignal();
-      try {
-        onActivate();
+        _server = await ServerSocket.bind(
+          InternetAddress.loopbackIPv4,
+          _port,
+          shared: false,
+        );
+        _first = true;
+        _server!.listen(_handle, onError: (_) {}, cancelOnError: false);
+        return true;
+      } on SocketException {
+        // 端口被占：先确认占着的是不是我们自己的另一个实例
+        final ours = await _notifyExisting();
+        if (ours) return false;
+        // 被别的程序占用了，换一个端口再试
+        _port++;
       } catch (e) {
-        debugPrint('activate failed: $e');
+        debugPrint('single instance: $e');
+        _port++;
       }
-    });
+    }
+    // 极端情况（端口全被占）：不阻止用户使用，退化为允许多开
+    debugPrint('single instance: fallback, allow start');
+    _first = true;
+    return true;
+  }
+
+  void setActivateHandler(VoidCallback cb) {
+    _onActivate = cb;
+  }
+
+  void _handle(Socket socket) {
+    socket.listen(
+      (data) {
+        final text = utf8.decode(data, allowMalformed: true);
+        if (!text.contains(_token)) return;
+        try {
+          socket.write('PONG $_token\n');
+          socket.flush();
+        } catch (_) {}
+        _onActivate?.call();
+      },
+      onError: (_) {},
+      cancelOnError: true,
+    );
+  }
+
+  /// 连一下已知实例：是同类应用就顺手请求它把窗口唤到前台。
+  Future<bool> _notifyExisting() async {
+    try {
+      final s = await Socket.connect(
+        InternetAddress.loopbackIPv4,
+        _port,
+        timeout: const Duration(milliseconds: 700),
+      );
+      s.write('ACTIVATE $_token\n');
+      await s.flush();
+      final reply = await s
+          .cast<List<int>>()
+          .transform(utf8.decoder)
+          .first
+          .timeout(const Duration(milliseconds: 900), onTimeout: () => '');
+      s.destroy();
+      return reply.trim() == 'PONG $_token';
+    } catch (_) {
+      return false;
+    }
   }
 
   void dispose() {
-    _timer?.cancel();
-    _timer = null;
     try {
-      _raf?.unlockSync();
+      _server?.close();
     } catch (_) {}
-    try {
-      _raf?.closeSync();
-    } catch (_) {}
-    _raf = null;
+    _server = null;
   }
 }
