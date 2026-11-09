@@ -13,11 +13,9 @@
 namespace {
 
 void TLog(const char* message) {
-  FILE* file = nullptr;
-  if (fopen_s(&file, "C:\\Temp\\mynotes_native_tray.log", "a") == 0 && file) {
-    fprintf(file, "%s\n", message);
-    fclose(file);
-  }
+  // 公开分发版只输出到调试器，不在用户磁盘上写任何日志文件。
+  OutputDebugStringA(message);
+  OutputDebugStringA("\n");
 }
 
 // ---- 原生 Win32 托盘图标 + 右键菜单 ----

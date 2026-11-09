@@ -123,8 +123,21 @@ class NotesDb {
       await File(probe).writeAsString('ok');
       return dir;
     } catch (_) {
-      final appData = Platform.environment['APPDATA'] ?? 'C:\\Users\\Public';
-      final dir = p.join(appData, 'MyNotes', 'My Notes');
+      // 程序目录不可写（例如 macOS 的 .app 放在 /Applications）时，
+      // 退回各平台标准的用户数据目录，不写死任何 Windows 路径。
+      final home = Platform.environment['HOME'] ??
+          Platform.environment['USERPROFILE'] ?? '.';
+      final String base;
+      if (Platform.isMacOS) {
+        base = p.join(home, 'Library', 'Application Support');
+      } else if (Platform.isLinux) {
+        base = Platform.environment['XDG_DATA_HOME'] ??
+            p.join(home, '.local', 'share');
+      } else {
+        base = Platform.environment['APPDATA'] ??
+            p.join(home, 'AppData', 'Roaming');
+      }
+      final dir = p.join(base, 'MyNotes', 'My Notes');
       await Directory(dir).create(recursive: true);
       return dir;
     }

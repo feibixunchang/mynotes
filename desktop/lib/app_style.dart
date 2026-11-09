@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 
-/// 方正宋黑（GBK 内嵌）为全局唯一字体
-const String FZ_FONT = 'FangZhengSongHei';
+/// 公开分发版使用系统自带中文字体，不捆绑任何第三方/商业字体。
+/// 如需内嵌自有字体，请在 pubspec.yaml 的 flutter.fonts 中自行配置。
+const String FZ_FONT = 'Microsoft YaHei';
 
 /// 小字统一加深：宋黑细笔画在浅灰、小字号下会发虚，
 /// 这里把次级文字压到接近正文的深色，保证与列表标题一样锐利。

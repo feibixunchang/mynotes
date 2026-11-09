@@ -5,6 +5,14 @@
 
 > 本仓库只包含**源代码与构建配置**，不含任何笔记内容、账号、令牌或密码。详见 [PRIVACY.md](PRIVACY.md)。
 
+## 直接下载（Windows，免编译）
+
+**[下载 v1.3.3 零数据便携版](https://github.com/feibixunchang/mynotes/releases/latest)** · 文件：`mynotes-1.3.3-windows-x64-portable-clean.zip`
+
+解压后双击 `my_notes.exe` 即可，无需安装、不写注册表。该包是一个**全新建的空笔记库**：不含任何笔记、账号、令牌、内网地址、日志或附件，也不捆绑商业字体。
+首次启动会要求设置 4–6 位数字启动锁；同步默认为 `http://127.0.0.1:8000` 且令牌为空，可在「设置 → 同步」改成自己的服务地址。
+完整说明见压缩包内 `使用说明.txt`，发布包的逐项隐私审计结果见 Release 页面。
+
 ## 功能
 
 - **桌面版**：三栏布局、Markdown 编辑与预览、笔记本 / 标签 / 回收站、全文搜索、置顶、
@@ -32,7 +40,8 @@ docker compose up -d --build
 
 ### 桌面版（Windows）
 
-环境要求：Flutter 3.x（Windows 桌面支持）、Visual Studio 2022 Build Tools（C++ 桌面工作负载）、Windows 10/11 SDK。
+不想编译的话，直接用上面的 [Release 便携版](#直接下载windows免编译)。自行编译的要求：
+Flutter 3.x（Windows 桌面支持）、Visual Studio 2022 Build Tools（C++ 桌面工作负载）、Windows 10/11 SDK。
 
 ```bash
 cd desktop
@@ -59,10 +68,55 @@ syncToken=
 
 ## 关于字体
 
-原版界面使用内嵌「方正宋黑」，该字体为**商业授权字体，本仓库不分发**。
-未放置字体文件时，Flutter 会自动回退到系统字体，构建与功能都不受影响，只是字形不同。
+原开发版内嵌「方正宋黑」，该字体为**商业授权字体，本仓库和 Release 便携版都不分发**。
+公开版默认使用系统自带中文字体（Windows 上为微软雅黑，其他平台自动回退到系统中文字体），
+字形与原版略有不同，功能完全不受影响。
 自备授权字体的方法见 [desktop/assets/fonts/README.md](desktop/assets/fonts/README.md)；
 网页版同理，见 [web/README.md](web/README.md)。
+
+## macOS（想自己编译请看这里）
+
+Flutter **不支持从 Windows 交叉编译 macOS 应用**，`windows/` runner、`flutter_windows.dll`、
+`sqlite3.dll`、`app.so` 与 Release 里的 Windows 便携包在 Mac 上都不能用，必须在 Mac 上重新编译全部二进制。
+本仓库目前只有 `windows/` 平台目录，所以也不是「拿来源码直接 build」就能出 DMG，需要先生成
+macOS 工程并替换平台专属代码：
+
+```bash
+# 在 Mac 上：需 Xcode（含命令行工具）、Flutter 3.x macOS 桌面支持、CocoaPods
+git clone https://github.com/feibixunchang/mynotes.git
+cd mynotes/desktop
+flutter create --platforms=macos .     # 生成 macos/ Runner 与 Xcode 工程
+flutter pub get
+flutter build macos --release          # 产物是 .app，不是 DMG
+```
+
+编译前需要处理：
+
+1. **系统托盘**：`windows/runner/main.cpp` 里的 Win32 `Shell_NotifyIconW` 右键菜单不会进入 macOS 工程，
+   要在 `macos/Runner/AppDelegate.swift` 用 `NSStatusItem` + `NSMenu` 重写，或改用 `tray_manager` 之类的跨平台插件。
+2. **全局热键**：`Ctrl+Shift+Alt+N` 在 macOS 上需用 `NSEvent` 全局监听或 `hotkey_manager`，并申请辅助功能权限。
+3. **nativeapi**：插件声明了 macOS 平台且底层带 Objective-C++ 实现，Dart 层窗口/文件对话框/DPI 调用可保留，
+   但沙箱与签名下的行为需实测。
+4. **SQLite**：Windows 的 `sqlite3.dll` 用不了；macOS 自带 `libsqlite3.dylib`，
+   `sqflite_common_ffi` 可直接加载，需确认 `.app` 内的动态库查找路径。
+5. **字体与路径**：`FZ_FONT` 为 `Microsoft YaHei`，Mac 上会自动回退到苹方；
+   数据目录在程序目录不可写时已改为 `~/Library/Application Support/MyNotes/`（见 `lib/db.dart`）。
+   启动锁、笔记逻辑、同步均为纯 Dart，可直接复用。
+
+打 DMG（`flutter build macos --release` 只产出 `.app`）：
+
+```bash
+brew install create-dmg
+create-dmg --volname "我的笔记" --app-drop-link 480 170 --window-size 660 400 \
+  --icon "my_notes.app" 180 170 "我的笔记-1.3.3.dmg" \
+  build/macos/Build/Products/Release/my_notes.app
+```
+
+未签名未公证的 `.app` / DMG 在别人 Mac 上会被 Gatekeeper 拦截；自用可执行 `xattr -cr my_notes.app`，
+公开分发则需要 Apple Developer 账号做 Developer ID 签名 + `xcrun notarytool` 公证。
+同步照常在「设置」里填自己的网页版地址即可。
+
+> 说明：仓库**尚未包含经过 Mac 实机验证的 macOS 构建**，以上是移植清单，不是已验证的成品。
 
 ## 目录结构
 
