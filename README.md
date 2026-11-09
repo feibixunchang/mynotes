@@ -117,6 +117,12 @@ create-dmg --volname "我的笔记" --app-drop-link 480 170 --window-size 660 40
 同步照常在「设置」里填自己的网页版地址即可。
 
 > 说明：仓库**尚未包含经过 Mac 实机验证的 macOS 构建**，以上是移植清单，不是已验证的成品。
+>
+> [v1.3.3 Release](https://github.com/feibixunchang/mynotes/releases/tag/v1.3.3) 里另外提供了
+> `mynotes-1.3.3-macos-port-handoff.zip`：一份已做好平台适配、解压即可编译的 macOS Flutter 工程
+> （已移除 Windows 原生插件，托盘/窗口/文件对话框改用 Cocoa + MethodChannel 实现），
+> 附 `README_FIRST.txt` —— 给 Mac 端 AI 的执行指令、常见报错处理和逐项验收清单。
+> 这是**移植交接包**，仍需在 Mac 上编译并验收；Windows 主线不受影响。
 
 ## 目录结构
 
