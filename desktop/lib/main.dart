@@ -315,8 +315,9 @@ class _RootState extends State<_Root> {
 }
 
 Future<void> _selfTest() async {
-  final logFile = File(
-      '${Platform.environment['MYNOTES_SELFTEST_LOG'] ?? 'C:\\Temp\\build\\selftest_result.txt'}');
+  // 输出路径不写死绝对路径：默认落在系统临时目录，可用环境变量覆盖。
+  final logFile = File(Platform.environment['MYNOTES_SELFTEST_LOG'] ??
+      '${Directory.systemTemp.path}${Platform.pathSeparator}mynotes_selftest.txt');
   try {
     await NotesDb.init();
     logFile.writeAsStringSync('dataDir=${NotesDb.dataDir}\n');
