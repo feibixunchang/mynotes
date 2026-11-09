@@ -11,9 +11,11 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 import 'app_lock.dart';
 import 'app_version.dart';
 import 'app_style.dart';
+import 'biometrics.dart';
 import 'db.dart';
 import 'pages/notes_page.dart';
 import 'pages/settings_page.dart';
+import 'single_instance.dart';
 import 'sync.dart';
 
 /// 托盘初始化诊断日志（写到数据目录，便于确认 Windows 上是否真的挂上了托盘图标）
@@ -26,12 +28,35 @@ void _trayLog(String msg) {
 }
 
 Future<void> main() async {
+  // 单实例：必须在数据库与窗口初始化之前判断。
+  // 抢不到锁说明已经有一份在跑，留个唤醒信号后立刻退出，
+  // 已运行的实例会把自己显示到前台（等于双击图标唤出窗口）。
+  // 自测模式（无界面）不参与抢锁，避免和正在使用的实例互相打架。
+  final selfTestMode = Platform.environment['MYNOTES_SELFTEST'] == '1';
+  if (!selfTestMode && !SingleInstance.i.acquireSync()) {
+    exit(0);
+  }
+
   WidgetsFlutterBinding.ensureInitialized();
 
   // 无界面自测模式：验证"新建笔记永不失效"等核心逻辑
-  if (Platform.environment['MYNOTES_SELFTEST'] == '1') {
+  if (selfTestMode) {
     await _selfTest();
     return;
+  }
+
+  // 生物识别探测自测：只验证系统 Hello 是否可用，结果写 biometric.log
+  if (Platform.environment['MYNOTES_BIO_SELFTEST'] == '1') {
+    final ok = await Biometrics.isAvailable(refresh: true);
+    debugPrint('BIO available=$ok label=${Biometrics.label} reason=${Biometrics.lastReason}');
+    exit(0);
+  }
+
+  // 生物识别验证自测：真的弹出 Windows Hello 对话框走一次验证流程
+  if (Platform.environment['MYNOTES_BIO_VERIFY'] == '1') {
+    final ok = await Biometrics.verify('验证我的笔记指纹解锁');
+    debugPrint('BIO verify=$ok reason=${Biometrics.lastReason}');
+    exit(0);
   }
 
   try {
@@ -119,6 +144,13 @@ Future<void> main() async {
   window?.show();
   window?.focus();
 
+  // 再双击一次图标（第二个实例被拦下后会写唤醒信号）：把自己拉回前台，
+  // 即使当前是「关到托盘」的隐藏状态也能唤出。
+  SingleInstance.i.watchForActivate(() {
+    window?.show();
+    window?.focus();
+  });
+
   // 记住窗口大小/位置（防抖保存：拖拽期间最多只挂一个定时器，减少开销）
   Timer? boundsTimer;
   void saveBounds() {
@@ -175,7 +207,7 @@ Future<void> main() async {
     }
   }
 
-  // ---- 与自托管网页版同步 ----
+  // ---- 局域网同步（NAS mynotes-sync 容器）----
   SyncService.i.start();
 
   runApp(_Root(initialNoteId: openId));
@@ -282,7 +314,7 @@ class _RootState extends State<_Root> {
 
 Future<void> _selfTest() async {
   final logFile = File(
-      '${Platform.environment['MYNOTES_SELFTEST_LOG'] ?? 'selftest_result.txt'}');
+      '${Platform.environment['MYNOTES_SELFTEST_LOG'] ?? 'C:\\Temp\\build\\selftest_result.txt'}');
   try {
     await NotesDb.init();
     logFile.writeAsStringSync('dataDir=${NotesDb.dataDir}\n');

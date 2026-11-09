@@ -20,6 +20,76 @@ class SyncService extends ChangeNotifier {
   String get baseUrl => SettingsStore.readSync('syncUrl', defaultUrl).trim();
   String get token => SettingsStore.readSync('syncToken', defaultToken).trim();
 
+  /// 规范化用户填进来的地址：补 http:// 前缀、去掉结尾多余的斜杠。
+  static String normalizeUrl(String raw) {
+    var s = raw.trim();
+    if (s.isEmpty) return s;
+    if (!s.startsWith('http://') && !s.startsWith('https://')) {
+      s = 'http://$s';
+    }
+    while (s.length > 1 && s.endsWith('/')) {
+      s = s.substring(0, s.length - 1);
+    }
+    return s;
+  }
+
+  /// 试连一次同步服务，返回给用户看的一句话结论。
+  /// 走 /api/state 而不是 /health：前者需要令牌，能顺便验证令牌是否正确。
+  Future<String> testConnection({String? url, String? token}) async {
+    final base = normalizeUrl(url ?? baseUrl);
+    final tok = (token ?? this.token).trim();
+    if (base.isEmpty) return '请先填写服务器地址';
+    final uri = Uri.tryParse('$base/api/state?since=999999999');
+    if (uri == null || uri.host.isEmpty) return '地址格式不正确：$base';
+    try {
+      final client = HttpClient()..connectionTimeout = const Duration(seconds: 6);
+      final req = await client.openUrl('GET', uri);
+      if (tok.isNotEmpty) req.headers.set('Authorization', 'Bearer $tok');
+      final resp = await req.close().timeout(const Duration(seconds: 10));
+      final body = await resp.transform(utf8.decoder).join();
+      client.close(force: true);
+      if (resp.statusCode == 401 || resp.statusCode == 403) {
+        return '服务器拒绝访问（HTTP ${resp.statusCode}）：令牌不正确，或服务端已启用令牌而这里留空了';
+      }
+      if (resp.statusCode >= 400) return '服务器返回 HTTP ${resp.statusCode}';
+      Map<String, dynamic>? j;
+      try {
+        final d = jsonDecode(body);
+        if (d is Map<String, dynamic>) j = d;
+      } catch (_) {}
+      if (j == null) return '连上了，但返回内容不是笔记服务（确认地址端口对不对）';
+      final rev = (j['rev'] as num?)?.toInt();
+      final total = (j['notes'] as List?)?.length;
+      return '连接成功 · 服务端 rev ${rev ?? '?'}'
+          '${total != null ? ' · 本次收到 $total 条' : ''}';
+    } catch (e) {
+      final s = e.toString();
+      if (s.contains('TimeoutException')) return '连接超时：检查地址、端口与网络';
+      if (s.contains('SocketException')) return '连不上：主机或端口不可达（$base）';
+      return '连接失败：$s';
+    }
+  }
+
+  /// 保存设置后重建连接。refresh=true 时清空增量游标并完整重推一次，
+  /// 用于「切换到了另一台服务器」——这样新服务器也能拿到本地全部笔记。
+  Future<void> applyConfig({bool refresh = false}) async {
+    stop();
+    live = false;
+    if (refresh) {
+      _rev = -1;
+      _dirty = true;
+      _epoch = -1;
+      // -1 表示「epoch 未知」：首次拉取只记录不清空本地，避免误删
+      await SettingsStore.write('syncEpoch', '-1');
+    }
+    lastOk = true;
+    lastError = null;
+    resultText = '正在连接…';
+    atMs = null;
+    notifyListeners();
+    start();
+  }
+
   String resultText = '尚未同步';
   String? lastError;
   int? atMs;

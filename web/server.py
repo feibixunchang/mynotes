@@ -3,7 +3,7 @@
 #
 # 这是一个"完整可用的网页版笔记应用"：既提供 Web UI，也提供桌面端同步接口。
 #   GET  /                     -> 网页版应用（内嵌方正宋黑）
-#   GET  /font.ttf             -> 可选自定义字体（未放置时返回 404，前端回退系统字体）
+#   GET  /font.ttf             -> 方正宋黑字体
 #   GET  /favicon.ico          -> 站点图标
 #   GET  /health               -> 健康检查
 #   GET  /api/state?since=REV  -> 全量/增量状态
@@ -35,8 +35,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
 TOKEN = os.environ.get("SYNC_TOKEN", "")
 PORT = int(os.environ.get("PORT", "8000"))
-APP_VERSION = "1.3.3"
-BUILD_STAMP = "2026-11-09 20:10"
+APP_VERSION = "1.3.4"
+BUILD_STAMP = "2026-11-09 23:20"
 STATE = os.path.join(DATA_DIR, "state.json")
 LEGACY = os.path.join(DATA_DIR, "snapshot.json")
 MD_DIR = os.path.join(DATA_DIR, "md")

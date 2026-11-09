@@ -7,7 +7,7 @@
 
 ## 直接下载（Windows，免编译）
 
-**[下载 v1.3.3 零数据便携版](https://github.com/feibixunchang/mynotes/releases/latest)** · 文件：`mynotes-1.3.3-windows-x64-portable-clean.zip`
+**[下载 v1.3.4 零数据便携版](https://github.com/feibixunchang/mynotes/releases/latest)** · 文件：`mynotes-1.3.4-windows-x64-portable-clean.zip`
 
 解压后双击 `my_notes.exe` 即可，无需安装、不写注册表。该包是一个**全新建的空笔记库**：不含任何笔记、账号、令牌、内网地址、日志或附件，也不捆绑商业字体。
 首次启动会要求设置 4–6 位数字启动锁；同步默认为 `http://127.0.0.1:8000` 且令牌为空，可在「设置 → 同步」改成自己的服务地址。
@@ -19,8 +19,16 @@
   图片查看与插入、导入 Simplenote JSON / Markdown、系统托盘与全局热键 `Ctrl+Shift+Alt+N`
 - **启动锁**：首次启动强制设置 4–6 位数字密码，之后每次启动需解锁；
   加盐 SHA-256 存储，连续输错 5 次冷却 30 秒；可在「设置 → 安全」修改 / 关闭 / 立即锁定
+- **生物识别解锁**：系统配好 Windows Hello（指纹 / 人脸 / PIN）后，锁屏页会出现
+  「Windows Hello 解锁」按钮。验证弹窗由系统自己完成，应用只拿到「通过 / 未通过」，
+  不接触指纹模板、人脸数据或 PIN；没配 Hello 的设备该按钮不显示
+- **单实例**：同一 Windows 账号下只允许开一个窗口，重复双击图标会把已有窗口唤到前台
+  （即使它已经关到托盘），不会再出现两个进程同时改同一个笔记库
+- **同步设置界面**：「设置 → 同步」里可直接填服务器地址与令牌，支持「测试连接」和
+  「保存并重连」，不必再手改 `settings.txt`；换服务器会做一次完整推送
 - **网页版**：三栏布局、编辑 / 预览、看图、插入图片、删除 / 还原 / 彻底删除、
-  导入导出 Markdown、中文右键菜单、SSE 实时同步
+  导入导出 Markdown、中文右键菜单、SSE 实时同步；手机浏览器自动切换成
+  单栏 + 抽屉式导航，并支持安卓返回键从正文退回列表
 - **跨端一致性**：一端「清空所有笔记」通过 `epoch` 机制同步到另一端，不会把旧笔记推回来
 - **版本号**：窗口标题、状态栏、设置页、网页右下角、`/health` 接口五处一致
 
@@ -108,7 +116,7 @@ flutter build macos --release          # 产物是 .app，不是 DMG
 ```bash
 brew install create-dmg
 create-dmg --volname "我的笔记" --app-drop-link 480 170 --window-size 660 400 \
-  --icon "my_notes.app" 180 170 "我的笔记-1.3.3.dmg" \
+  --icon "my_notes.app" 180 170 "我的笔记-1.3.4.dmg" \
   build/macos/Build/Products/Release/my_notes.app
 ```
 

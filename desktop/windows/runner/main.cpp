@@ -58,6 +58,33 @@ void HideMainWindow() {
   if (hwnd) ShowWindow(hwnd, SW_HIDE);
 }
 
+// ---- 单实例 ----
+// 命名互斥体保证同一用户会话只跑一个实例。第二个进程不做任何窗口/引擎初始化，
+// 直接把已有窗口唤到前台后退出——「关到托盘后再双击图标」也能唤出窗口，
+// 而不是悄悄多开一个。
+constexpr wchar_t kSingleInstanceMutex[] =
+    L"Local\\MyNotes-Portable-SingleInstance";
+
+bool ActivateRunningInstance() {
+  // 第一个实例可能还在创建窗口，稍等重试几次
+  for (int i = 0; i < 15; ++i) {
+    HWND hwnd = FindMainWindow();
+    if (hwnd) {
+      if (::IsIconic(hwnd)) {
+        ::ShowWindow(hwnd, SW_RESTORE);
+      } else {
+        ::ShowWindow(hwnd, SW_SHOW);
+      }
+      ::SetForegroundWindow(hwnd);
+      ::BringWindowToTop(hwnd);
+      ::SetFocus(hwnd);
+      return true;
+    }
+    ::Sleep(120);
+  }
+  return false;
+}
+
 // 向已获得焦点的应用窗口发送 Ctrl+<vk>，触发界面里的快捷键
 void SendCtrlKey(WORD vk) {
   INPUT inputs[4] = {};
@@ -226,6 +253,17 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
 
   ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
   TLog("wWinMain enter");
+
+  // 只允许一个实例：已有实例在跑就唤醒它，然后本进程静默退出
+  HANDLE instance_mutex = ::CreateMutexW(nullptr, FALSE, kSingleInstanceMutex);
+  if (instance_mutex != nullptr && ::GetLastError() == ERROR_ALREADY_EXISTS) {
+    TLog("another instance is running -> activate it");
+    ActivateRunningInstance();
+    ::CloseHandle(instance_mutex);
+    ::CoUninitialize();
+    return EXIT_SUCCESS;
+  }
+  TLog("single instance granted");
 
   flutter::DartProject project(L"data");
   // Skia/ANGLE(D3D11) 后端在这台 AMD 核显上拖拽窗口明显更顺滑

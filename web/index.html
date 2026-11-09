@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>我的笔记 · NAS 网页版</title>
 <link rel="icon" href="/favicon.ico">
 <style>
@@ -17,7 +17,7 @@ body{background:var(--bg);color:var(--txt);
   font-family:'FZSongHei','Microsoft YaHei',sans-serif;font-size:16px;font-weight:500}
 button,input,select,textarea{font-family:'FZSongHei','Microsoft YaHei',sans-serif}
 button{font-weight:600}
-#app{display:flex;flex-direction:row;align-items:stretch;width:100%;height:100vh;overflow:hidden}
+#app{display:flex;flex-direction:row;align-items:stretch;width:100%;height:100vh;height:100dvh;overflow:hidden}
 .col{display:flex;flex-direction:column;min-height:0}
 #left{width:250px;flex:none;background:var(--panel);border-right:1px solid var(--line)}
 #mid{width:330px;flex:none;background:var(--panel);border-right:1px solid var(--line)}
@@ -82,6 +82,9 @@ input,textarea,select{font-family:inherit;font-size:16px;font-weight:500;color:v
 .dot{width:9px;height:9px;border-radius:50%;background:#2e7d32;display:inline-block;margin-right:6px}
 .dot.off{background:#c33}
 .hide{display:none!important}
+/* 只在手机上出现的按钮（汉堡菜单） */
+.only-mobile{display:none}
+#drawerMask{display:none}
 .empty{padding:28px;text-align:center;color:var(--hint);font-size:15px;font-weight:600}
 /* 弹层 */
 .mask{position:fixed;inset:0;background:rgba(20,24,34,.55);z-index:20;display:flex;
@@ -115,14 +118,68 @@ input,textarea,select{font-family:inherit;font-size:16px;font-weight:500;color:v
   #left{width:186px}#mid{width:252px}#bar{gap:6px}
   .btn{padding:6px 9px;font-size:14px}
 }
+/* ---------- 手机 / 窄屏 ---------- */
 @media (max-width:720px){
-  #left{display:none}#mid{width:100%}#right{display:none}
-  #app.mobile-edit #mid{display:none}#app.mobile-edit #right{display:flex}
+  /* 左栏变成滑出抽屉，不再直接隐藏——否则手机上没有新建/切换笔记本/回收站的入口 */
+  #left{display:flex;position:fixed;top:0;left:0;bottom:0;width:82vw;max-width:330px;z-index:30;
+    transform:translateX(-100%);transition:transform .22s ease;
+    box-shadow:0 0 34px rgba(20,24,34,.30);border-right:none}
+  #app.drawer-open #left{transform:none}
+  #app.drawer-open #drawerMask{display:block}
+  #drawerMask{position:fixed;inset:0;background:rgba(20,24,34,.45);z-index:25}
+  #mid{width:100%}
+  #right{display:none}
+  #app.mobile-edit #mid{display:none}
+  #app.mobile-edit #right{display:flex}
+  .only-mobile{display:inline-flex!important}
+  .head{padding:10px 12px;font-size:17px}
+  .logo{width:26px;height:26px;border-radius:7px;font-size:15px}
+  .btn{padding:9px 13px;font-size:15px}
+  .navitem{padding:13px 14px;font-size:16px}
+  .item{padding:13px 14px}
+  .item .s{margin-top:4px}
+  /* 工具栏：一行横向滑动，避免 9 个按钮挤成三行吃掉正文空间 */
+  #bar{flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;gap:6px;padding:8px 10px}
+  #bar::-webkit-scrollbar{display:none}
+  #bar .btn{padding:8px 11px;font-size:14px;flex:none}
+  #bar .sp{display:none}
+  #wc{flex:none;font-size:13px}
+  #q{font-size:16px;padding:11px 12px}
+  #title{font-size:21px;padding:12px 14px 4px}
+  #meta{padding:0 14px 8px;gap:8px}
+  #meta label{font-size:13px}
+  #meta input{font-size:16px;padding:7px 9px}
+  #meta #bookIn{width:calc(50% - 34px)}
+  #meta #tagIn{min-width:90px}
+  #body{padding:10px 14px;font-size:17px;line-height:1.8}
+  #preview{padding:12px 15px;font-size:17px}
+  /* 底部状态栏：只留关键信息，其余可横向滑动查看 */
+  #status{height:30px;font-size:12px;gap:10px;padding:0 10px;
+    overflow-x:auto;white-space:nowrap;-webkit-overflow-scrolling:touch}
+  #status::-webkit-scrollbar{display:none}
+  #status #rev,#status #lastSave{display:none}
+  .mask{padding:12px}
+  .box{padding:16px;border-radius:14px;max-height:90vh}
+  .box h3{font-size:17px}
+  .row .btn{flex:1}
+  .gallery{grid-template-columns:repeat(auto-fill,minmax(140px,1fr))}
+  .gallery img{height:130px}
+  #toast{bottom:64px;font-size:14px;padding:9px 16px;max-width:88vw;text-align:center}
+  /* 手机上右键菜单用不上，避免长按误触 */
+  .ctx{display:none!important}
+}
+/* 窄屏手机（iPhone SE 之类）再收一点 */
+@media (max-width:400px){
+  #left{width:88vw}
+  .btn{padding:8px 11px;font-size:14px}
+  #bar .btn{padding:7px 9px;font-size:13px}
+  #status{font-size:11px}
 }
 </style>
 </head>
 <body>
 <div id="app">
+  <div id="drawerMask"></div>
   <div id="left" class="col">
     <div class="head"><span class="logo">笔</span>我的笔记</div>
     <div class="pad"><button class="btn pri" id="newBtn" style="width:100%">＋ 新建笔记</button></div>
@@ -137,7 +194,7 @@ input,textarea,select{font-family:inherit;font-size:16px;font-weight:500;color:v
   </div>
 
   <div id="mid" class="col">
-    <div class="head"><span id="listTitle">全部笔记</span><span class="sp"></span>
+    <div class="head"><button class="btn ghost only-mobile" id="menuBtn" title="菜单">☰</button><span id="listTitle">全部笔记</span><span class="sp"></span>
       <button class="btn ghost" id="reloadBtn" title="重新拉取">⟳</button>
       <button class="btn ghost hide" id="backBtn" title="返回列表">✕</button></div>
     <div class="pad"><input id="q" placeholder="搜索标题或正文…"></div>
@@ -171,7 +228,7 @@ input,textarea,select{font-family:inherit;font-size:16px;font-weight:500;color:v
       <span id="cnt">笔记 0 条</span>
       <span id="lastSave">尚未保存</span>
       <span class="sp"></span>
-      <span id="ver" style="font-weight:700;color:#b45309">v1.3.3 · 2026-11-09 20:10</span>
+      <span id="ver" style="font-weight:700;color:#b45309">v1.3.4 · 2026-11-09 23:20</span>
       <span id="rev">rev -</span>
     </div>
   </div>
@@ -342,8 +399,7 @@ function open(id) {
   dirty = false; renderList();
   if (previewing) renderPreview();
   if (window.innerWidth <= 720) {
-    $('#app').classList.add('mobile-edit');
-    $('#backBtn').classList.remove('hide');
+    enterEditor();
   }
 }
 function md2html(src) {
@@ -510,10 +566,37 @@ $('#clearAllBtn').onclick = () => confirmBox(
   }).catch(e => toast('清空失败：' + e.message)));
 $('#newBtn').onclick = newNote;
 $('#reloadBtn').onclick = () => load(true);
-$('#backBtn').onclick = () => {
-  $('#app').classList.remove('mobile-edit');
+// ---- 手机端：左栏抽屉 + 系统返回键 ----
+const appEl = $('#app');
+const isNarrow = () => window.innerWidth <= 720;
+function openDrawer() { appEl.classList.add('drawer-open'); }
+function closeDrawer() { appEl.classList.remove('drawer-open'); }
+function enterEditor() {
+  appEl.classList.add('mobile-edit');
+  $('#backBtn').classList.remove('hide');
+  try { history.pushState({ mnEdit: 1 }, ''); } catch (e) {}
+}
+function leaveEditor(fromPop) {
+  appEl.classList.remove('mobile-edit');
   $('#backBtn').classList.add('hide');
-};
+  if (!fromPop && history.state && history.state.mnEdit) {
+    try { history.back(); } catch (e) {}
+  }
+}
+$('#menuBtn').onclick = openDrawer;
+$('#drawerMask').onclick = closeDrawer;
+$('#backBtn').onclick = () => leaveEditor(false);
+// 安卓返回键 / 浏览器后退：从编辑页回到列表，而不是直接退出网页
+window.addEventListener('popstate', () => {
+  if (appEl.classList.contains('mobile-edit')) leaveEditor(true);
+});
+window.addEventListener('resize', () => {
+  if (!isNarrow()) closeDrawer();
+});
+// 抽屉里点任何一项（新建/切换视图/导入/清空）都顺手收起抽屉
+$('#left').addEventListener('click', e => {
+  if (e.target.closest('.btn,.navitem')) closeDrawer();
+});
 $('#saveBtn').onclick = () => save();
 $('#delBtn').onclick = doDelete;
 $('#pinBtn').onclick = () => {

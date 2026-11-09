@@ -6,6 +6,7 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'biometrics.dart';
 import 'pages/settings_page.dart';
 
 /// 启动锁：4-6 位数字密码。
@@ -28,6 +29,10 @@ class AppLock {
       int.tryParse(SettingsStore.readSync('lockLen', '')) ?? 0;
   static bool get disabled =>
       SettingsStore.readSync('lockDisabled', '') == '1';
+
+  /// 是否允许用 Windows Hello / Touch ID 解锁（默认允许；系统没配就自动隐藏入口）
+  static bool get bioEnabled =>
+      SettingsStore.readSync('bioUnlock', '1') == '1';
   static bool get enabled =>
       !disabled &&
       _hash.isNotEmpty &&
@@ -333,10 +338,42 @@ class _UnlockPageState extends State<_UnlockPage> {
   int _remain = AppLock.remainSeconds;
   Timer? _timer;
 
+  // 生物识别：探测到系统真的支持才显示入口，避免给了按钮按下去没反应
+  bool _bioAvailable = false;
+  bool _bioBusy = false;
+
   @override
   void initState() {
     super.initState();
     if (_remain > 0) _startTimer();
+    if (AppLock.bioEnabled) _probeBio();
+  }
+
+  Future<void> _probeBio() async {
+    final ok = await Biometrics.isAvailable();
+    if (!mounted) return;
+    setState(() => _bioAvailable = ok);
+  }
+
+  Future<void> _submitBio() async {
+    if (_bioBusy || _remain > 0) return;
+    setState(() {
+      _bioBusy = true;
+      _error = '';
+    });
+    final ok = await Biometrics.verify('解锁我的笔记');
+    if (!mounted) return;
+    setState(() => _bioBusy = false);
+    if (ok) {
+      await AppLock.recordSuccess();
+      widget.onDone();
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      _pin = '';
+      _error = Biometrics.lastReason.isEmpty ? '验证未通过，请用密码解锁' : Biometrics.lastReason;
+    });
   }
 
   @override
@@ -421,6 +458,25 @@ class _UnlockPageState extends State<_UnlockPage> {
                 _submit,
                 '解锁',
                 enabled: !locked),
+            if (_bioAvailable) ...[
+              const SizedBox(height: 6),
+              TextButton.icon(
+                onPressed: (locked || _bioBusy) ? null : _submitBio,
+                icon: Icon(
+                  _bioBusy ? Icons.hourglass_top_rounded : Icons.fingerprint_rounded,
+                  size: 22,
+                  color: locked ? const Color(0xFFB6BCC9) : kLockAccent,
+                ),
+                label: Text(
+                  _bioBusy ? '正在等待系统验证…' : Biometrics.label,
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: locked ? const Color(0xFFB6BCC9) : kLockAccent,
+                  ),
+                ),
+              ),
+            ],
             const SizedBox(height: 14),
             const Text('忘记密码：删除数据目录 settings.txt 中的 lockHash 行后重启（笔记保留）',
                 textAlign: TextAlign.center,
