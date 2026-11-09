@@ -1,0 +1,30 @@
+# 笔记数据与私密配置（永不提交）
+notes-data/
+data/
+*.db
+*.db-journal
+settings.txt
+state.json
+attachments/
+md/
+*.log
+
+# 商业授权字体：自行准备，切勿提交
+*.ttf
+*.otf
+
+# 构建产物与 IDE
+build/
+.dart_tool/
+.idea/
+*.iml
+*.ipr
+*.iws
+windows/flutter/ephemeral/
+__pycache__/
+*.pyc
+
+# 备份与截图
+backup*/
+*_shot*.png
+web_fixed.png

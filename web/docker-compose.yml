@@ -1,0 +1,16 @@
+services:
+  mynotes-web:
+    build: .
+    image: mynotes-web:local
+    container_name: mynotes-web
+    ports:
+      - "8000:8000"          # 按需修改左侧宿主机端口
+    volumes:
+      - ./data:/data         # 笔记状态、Markdown 镜像、附件都在这里
+    environment:
+      DATA_DIR: /data
+      PORT: "8000"
+      SYNC_TOKEN: ""         # 留空 = 局域网免令牌；设置后接口与页面需要该令牌
+      PYTHONUNBUFFERED: "1"
+      LANG: C.UTF-8
+    restart: unless-stopped

@@ -1,0 +1,692 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>我的笔记 · NAS 网页版</title>
+<link rel="icon" href="/favicon.ico">
+<style>
+@font-face{font-family:'FZSongHei';src:url('/font.ttf') format('truetype');font-display:swap}
+:root{
+  --bg:#f4f5f9;--panel:#fff;--line:#e3e6ee;--txt:#1f2430;
+  --sub:#374151;--hint:#465264;--acc:#4a5ee5;--orange:#f97316;--danger:#d33;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--txt);
+  font-family:'FZSongHei','Microsoft YaHei',sans-serif;font-size:16px;font-weight:500}
+button,input,select,textarea{font-family:'FZSongHei','Microsoft YaHei',sans-serif}
+button{font-weight:600}
+#app{display:flex;flex-direction:row;align-items:stretch;width:100%;height:100vh;overflow:hidden}
+.col{display:flex;flex-direction:column;min-height:0}
+#left{width:250px;flex:none;background:var(--panel);border-right:1px solid var(--line)}
+#mid{width:330px;flex:none;background:var(--panel);border-right:1px solid var(--line)}
+#right{flex:1;min-width:0;background:var(--bg)}
+.head{padding:12px 14px;font-weight:700;font-size:18px;display:flex;align-items:center;gap:9px;
+  border-bottom:1px solid var(--line);flex:none}
+.logo{width:28px;height:28px;border-radius:8px;background:var(--orange);display:inline-flex;
+  align-items:center;justify-content:center;color:#fff;font-size:16px;font-weight:700;flex:none}
+.sp{flex:1}
+.btn{border:1px solid var(--line);background:#fff;border-radius:7px;padding:7px 12px;
+  font-family:inherit;font-size:15px;font-weight:600;cursor:pointer;color:var(--txt);white-space:nowrap}
+.btn:hover{border-color:var(--acc);color:var(--acc)}
+.btn.pri{background:var(--orange);border-color:var(--orange);color:#fff}
+.btn.pri:hover{background:#ea6a0a;color:#fff}
+.btn.ghost{background:transparent;border-color:transparent}
+.btn.danger:hover{border-color:var(--danger);color:var(--danger)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.pad{padding:10px 12px;flex:none}
+.list{overflow:auto;flex:1;padding:6px 0}
+.navitem{padding:9px 14px;cursor:pointer;font-size:15px;font-weight:600;color:var(--sub);
+  display:flex;align-items:center;gap:8px;border-left:3px solid transparent}
+.navitem:hover{background:#f0f2fb}
+.navitem.on{background:#fff3e9;border-left-color:var(--orange);color:#b45309}
+.navitem .n{margin-left:auto;font-size:14px;font-weight:600;color:var(--hint)}
+.navtitle{padding:12px 14px 4px;font-size:14px;font-weight:700;color:var(--hint);letter-spacing:.5px}
+.item{padding:10px 14px;border-bottom:1px solid var(--line);cursor:pointer}
+.item:hover{background:#f0f2fb}
+.item.sel{background:#fff0e4;box-shadow:inset 3px 0 0 var(--orange)}
+.item .t{font-weight:700;font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--txt)}
+.item .s{font-size:15px;font-weight:600;color:var(--sub);white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis;margin-top:3px}
+.item .m{font-size:14px;font-weight:600;color:var(--hint);margin-top:4px;display:flex;gap:10px}
+.item.trashed .t{color:#8b93a1;text-decoration:line-through}
+input,textarea,select{font-family:inherit;font-size:16px;font-weight:500;color:var(--txt)}
+#q{width:100%;border:1px solid var(--line);border-radius:7px;padding:9px 11px;background:#fff;
+  font-size:15px;font-weight:600}
+#q::placeholder,input::placeholder,textarea::placeholder{color:#6b7483;font-weight:600}
+#bar{display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid var(--line);
+  background:var(--panel);flex:none;flex-wrap:wrap}
+#title{width:100%;border:none;background:transparent;font-size:23px;font-weight:700;outline:none;
+  padding:12px 16px 6px}
+#meta{display:flex;align-items:center;gap:10px;padding:0 16px 8px;flex:none;flex-wrap:wrap}
+#meta label{font-size:14px;font-weight:700;color:var(--sub)}
+#meta input{font-size:15px;font-weight:600;border:1px solid var(--line);border-radius:6px;
+  padding:5px 8px;background:#fff;outline:none}
+#meta input:focus{border-color:var(--orange)}
+#body{flex:1;width:100%;border:none;resize:none;padding:12px 16px;outline:none;
+  line-height:1.85;background:transparent;font-size:16px;font-weight:500;min-height:120px}
+#preview{flex:1;overflow:auto;padding:14px 20px;line-height:1.85;font-size:16px;font-weight:500}
+#preview img{max-width:100%;border-radius:6px}
+#preview h1{font-size:28px;margin:.6em 0 .3em}
+#preview h2{font-size:24px;margin:.6em 0 .3em}
+#preview h3{font-size:20px;margin:.6em 0 .3em}
+#preview code{background:#eceff5;padding:2px 6px;border-radius:4px;font-size:15px}
+#preview pre{background:#eceff5;padding:12px;border-radius:7px;overflow:auto}
+#preview pre code{background:none;padding:0}
+#preview blockquote{margin:.5em 0;padding-left:12px;border-left:3px solid var(--orange);color:var(--sub)}
+#preview a{color:var(--acc)}
+#preview ul,#preview ol{padding-left:1.5em}
+#status{height:34px;border-top:1px solid var(--line);background:#eef0f6;flex:none;
+  display:flex;align-items:center;gap:16px;padding:0 14px;font-size:14px;font-weight:600;color:var(--sub)}
+.dot{width:9px;height:9px;border-radius:50%;background:#2e7d32;display:inline-block;margin-right:6px}
+.dot.off{background:#c33}
+.hide{display:none!important}
+.empty{padding:28px;text-align:center;color:var(--hint);font-size:15px;font-weight:600}
+/* 弹层 */
+.mask{position:fixed;inset:0;background:rgba(20,24,34,.55);z-index:20;display:flex;
+  align-items:center;justify-content:center;padding:24px}
+.box{background:#fff;border-radius:12px;padding:20px 22px;width:min(760px,94vw);
+  max-height:86vh;display:flex;flex-direction:column;box-shadow:0 18px 60px rgba(0,0,0,.25)}
+.box h3{margin:0 0 12px;font-size:19px}
+.gallery{overflow:auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;margin:12px 0}
+.gallery figure{margin:0;background:#f6f7fb;border:1px solid var(--line);border-radius:8px;padding:8px}
+.gallery img{width:100%;height:180px;object-fit:contain;background:#fff}
+.gallery figcaption{font-size:14px;font-weight:600;color:var(--sub);word-break:break-all;margin-top:6px}
+.row{display:flex;gap:10px;align-items:center;justify-content:flex-end;margin-top:12px}
+#toast{position:fixed;left:50%;bottom:56px;transform:translateX(-50%);background:#232838;color:#fff;
+  padding:10px 20px;border-radius:8px;font-size:15px;font-weight:600;z-index:40;opacity:0;
+  transition:opacity .2s;pointer-events:none}
+#toast.show{opacity:1}
+/* 中文右键菜单（接管浏览器原生英文菜单） */
+.ctx{position:fixed;z-index:60;min-width:190px;background:#fff;border:1px solid var(--line);
+  border-radius:9px;padding:5px;box-shadow:0 12px 36px rgba(20,24,34,.22);
+  font-size:15px;font-weight:600;user-select:none}
+.ctx-item{padding:8px 12px;border-radius:6px;cursor:pointer;color:var(--txt);
+  display:flex;align-items:center;justify-content:space-between;gap:26px;white-space:nowrap}
+.ctx-item:hover{background:#fff0e4;color:#b45309}
+.ctx-item .k{font-size:13px;font-weight:600;color:var(--hint)}
+.ctx-item.dis{opacity:.38;pointer-events:none}
+.ctx-sep{height:1px;background:var(--line);margin:5px 6px}
+@media (max-width:1100px){
+  #left{width:210px}#mid{width:290px}
+}
+@media (max-width:980px){
+  #left{width:186px}#mid{width:252px}#bar{gap:6px}
+  .btn{padding:6px 9px;font-size:14px}
+}
+@media (max-width:720px){
+  #left{display:none}#mid{width:100%}#right{display:none}
+  #app.mobile-edit #mid{display:none}#app.mobile-edit #right{display:flex}
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="left" class="col">
+    <div class="head"><span class="logo">笔</span>我的笔记</div>
+    <div class="pad"><button class="btn pri" id="newBtn" style="width:100%">＋ 新建笔记</button></div>
+    <div class="list" id="nav"></div>
+    <div class="pad" style="border-top:1px solid var(--line);display:flex;gap:8px">
+      <button class="btn" id="importBtn" style="flex:1">导入 MD</button>
+      <a class="btn" href="/api/export.md" download="我的笔记.md" style="flex:1;text-align:center;text-decoration:none">导出全部</a>
+    </div>
+    <div class="pad" style="padding-top:0">
+      <button class="btn danger" id="clearAllBtn" style="width:100%">清空所有笔记</button>
+    </div>
+  </div>
+
+  <div id="mid" class="col">
+    <div class="head"><span id="listTitle">全部笔记</span><span class="sp"></span>
+      <button class="btn ghost" id="reloadBtn" title="重新拉取">⟳</button>
+      <button class="btn ghost hide" id="backBtn" title="返回列表">✕</button></div>
+    <div class="pad"><input id="q" placeholder="搜索标题或正文…"></div>
+    <div class="list" id="list"></div>
+  </div>
+
+  <div id="right" class="col">
+    <div id="bar">
+      <button class="btn" id="editBtn">编辑</button>
+      <button class="btn" id="pvBtn">预览</button>
+      <button class="btn" id="imgBtn">看图</button>
+      <button class="btn" id="uploadBtn">插入图片</button>
+      <span class="sp"></span>
+      <span id="wc" style="font-size:14px;font-weight:700;color:var(--sub)">0 字</span>
+      <button class="btn" id="pinBtn">置顶</button>
+      <button class="btn danger" id="delBtn">删除</button>
+      <button class="btn pri" id="saveBtn">保存</button>
+    </div>
+    <input id="title" placeholder="标题（留空自动取正文首行）">
+    <div id="meta">
+      <label for="bookIn">笔记本</label>
+      <input id="bookIn" list="bookList" placeholder="默认" style="width:150px">
+      <datalist id="bookList"></datalist>
+      <label for="tagIn">标签</label>
+      <input id="tagIn" placeholder="用逗号分隔" style="flex:1;min-width:140px">
+    </div>
+    <textarea id="body" placeholder="开始写吧…支持 Markdown，可插入图片"></textarea>
+    <div id="preview" class="hide"></div>
+    <div id="status">
+      <span><i class="dot off" id="liveDot"></i><span id="liveTxt">连接中…</span></span>
+      <span id="cnt">笔记 0 条</span>
+      <span id="lastSave">尚未保存</span>
+      <span class="sp"></span>
+      <span id="ver" style="font-weight:700;color:#b45309">v1.3.3 · 2026-11-09 20:10</span>
+      <span id="rev">rev -</span>
+    </div>
+  </div>
+</div>
+
+<input type="file" id="imgFile" accept="image/*" class="hide">
+<input type="file" id="mdFile" accept=".md,.markdown,.txt" class="hide">
+
+<div id="galleryMask" class="mask hide">
+  <div class="box">
+    <h3>看图 · 本笔记中的图片</h3>
+    <div class="gallery" id="gallery"></div>
+    <div class="row"><button class="btn pri" id="galleryClose">关闭</button></div>
+  </div>
+</div>
+
+<div id="trashMask" class="mask hide">
+  <div class="box" style="width:min(460px,94vw)">
+    <h3 id="trashTitle">确认</h3>
+    <div id="trashText" style="font-size:15px;font-weight:600;color:var(--sub)"></div>
+    <div class="row">
+      <button class="btn" id="trashCancel">取消</button>
+      <button class="btn pri" id="trashOk">确定</button>
+    </div>
+  </div>
+</div>
+
+<div id="ctxMenu" class="ctx hide">
+  <div class="ctx-item" data-a="cut">剪切<span class="k">Ctrl+X</span></div>
+  <div class="ctx-item" data-a="copy">复制<span class="k">Ctrl+C</span></div>
+  <div class="ctx-item" data-a="paste">粘贴<span class="k">Ctrl+V</span></div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item" data-a="selectall">全选<span class="k">Ctrl+A</span></div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item" data-a="undo">撤销<span class="k">Ctrl+Z</span></div>
+  <div class="ctx-item" data-a="redo">重做<span class="k">Ctrl+Y</span></div>
+  <div class="ctx-item hide" data-a="openimg">在新标签页打开图片</div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+'use strict';
+const $ = s => document.querySelector(s);
+const esc = s => (s == null ? '' : String(s)).replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+let notes = new Map();
+let selId = null, rev = -1, previewing = false, dirty = false, es = null;
+let view = 'all', token = localStorage.getItem('mn_token') || '';
+let epoch = -1;
+
+function api(path, opt) {
+  opt = opt || {};
+  opt.headers = Object.assign({'Content-Type': 'application/json'}, opt.headers || {});
+  if (token) opt.headers['Authorization'] = 'Bearer ' + token;
+  return fetch(path, opt).then(async r => {
+    if (r.status === 401) {
+      const t = prompt('服务端要求访问令牌，请输入：', token || '');
+      if (t) { token = t.trim(); localStorage.setItem('mn_token', token); return api(path, opt); }
+      throw new Error('unauthorized');
+    }
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const ct = r.headers.get('content-type') || '';
+    return ct.includes('json') ? r.json() : r.text();
+  });
+}
+function toast(msg) {
+  const t = $('#toast'); t.textContent = msg; t.classList.add('show');
+  clearTimeout(window._toast); window._toast = setTimeout(() => t.classList.remove('show'), 1900);
+}
+function flash(msg) { $('#lastSave').textContent = msg; }
+function titleOf(n) {
+  if (n.title && n.title.trim()) return n.title.trim();
+  for (const line of (n.content || '').split('\n')) {
+    const t = line.replace(/^#{1,6}\s+/, '').replace(/^>\s?/, '')
+      .replace(/^[-*+]\s+/, '').replace(/^\d+\.\s+/, '')
+      .replace(/\*\*|`/g, '').trim();
+    if (t) return t.slice(0, 30);
+  }
+  return '未命名笔记';
+}
+function snippetOf(n) {
+  return (n.content || '').split('\n')
+    .map(s => s.replace(/!\[[^\]]*\]\([^)]*\)/g, '[图片]')
+      .replace(/^#{1,6}\s+/, '').replace(/^>\s?/, '')
+      .replace(/^[-*+]\s+/, '').replace(/\*\*|`/g, '').trim())
+    .filter(Boolean).join(' ');
+}
+function fmt(ms) {
+  if (!ms) return '--';
+  const d = new Date(ms), p = x => String(x).padStart(2, '0');
+  const same = d.toDateString() === new Date().toDateString();
+  return same ? p(d.getHours()) + ':' + p(d.getMinutes())
+    : p(d.getMonth() + 1) + '/' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+function books() {
+  const s = new Set();
+  for (const n of notes.values()) if (!n.trashed) s.add(n.bookId || '默认');
+  return [...s].sort();
+}
+function tags() {
+  const s = new Set();
+  for (const n of notes.values()) if (!n.trashed) (n.tags || []).forEach(t => s.add(t));
+  return [...s].sort();
+}
+function renderNav() {
+  const live = [...notes.values()].filter(n => !n.trashed);
+  const trashed = [...notes.values()].filter(n => n.trashed).length;
+  let html = '<div class="navitem ' + (view === 'all' ? 'on' : '') + '" data-v="all">📒 全部笔记<span class="n">' + live.length + '</span></div>';
+  html += '<div class="navtitle">笔记本</div>';
+  for (const b of books()) {
+    const n = live.filter(x => (x.bookId || '默认') === b).length;
+    html += '<div class="navitem ' + (view === 'book:' + b ? 'on' : '') + '" data-v="book:' + esc(b) + '">📁 ' + esc(b) + '<span class="n">' + n + '</span></div>';
+  }
+  html += '<div class="navtitle">标签</div>';
+  for (const t of tags()) {
+    const n = live.filter(x => (x.tags || []).includes(t)).length;
+    html += '<div class="navitem ' + (view === 'tag:' + t ? 'on' : '') + '" data-v="tag:' + esc(t) + '">🏷 ' + esc(t) + '<span class="n">' + n + '</span></div>';
+  }
+  html += '<div class="navtitle">其他</div>';
+  html += '<div class="navitem ' + (view === 'trash' ? 'on' : '') + '" data-v="trash">🗑 回收站<span class="n">' + trashed + '</span></div>';
+  $('#nav').innerHTML = html;
+  $('#nav').querySelectorAll('.navitem').forEach(el => el.onclick = () => {
+    view = el.dataset.v; renderNav(); renderList();
+    $('#listTitle').textContent = view === 'all' ? '全部笔记'
+      : view === 'trash' ? '回收站'
+      : view.startsWith('book:') ? view.slice(5)
+      : '标签：' + view.slice(4);
+  });
+  $('#bookList').innerHTML = books().map(b => '<option value="' + esc(b) + '">').join('');
+  $('#cnt').textContent = '笔记 ' + live.length + ' 条';
+  if (view === 'all') $('#listTitle').textContent = '全部笔记';
+}
+function currentArr() {
+  let arr = [...notes.values()];
+  arr = arr.filter(n => view === 'trash' ? !!n.trashed : !n.trashed);
+  if (view.startsWith('book:')) {
+    const b = view.slice(5); arr = arr.filter(n => (n.bookId || '默认') === b);
+  } else if (view.startsWith('tag:')) {
+    const t = view.slice(4); arr = arr.filter(n => (n.tags || []).includes(t));
+  }
+  const q = $('#q').value.trim().toLowerCase();
+  if (q) arr = arr.filter(n => (titleOf(n) + ' ' + (n.content || '')).toLowerCase().includes(q));
+  return arr.sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || (b.updatedAt || 0) - (a.updatedAt || 0));
+}
+function renderList() {
+  const arr = currentArr();
+  $('#list').innerHTML = arr.map(n => `
+    <div class="item ${n.id === selId ? 'sel' : ''} ${n.trashed ? 'trashed' : ''}" data-id="${esc(n.id)}">
+      <div class="t">${n.pinned ? '📌 ' : ''}${esc(titleOf(n))}</div>
+      <div class="s">${esc(snippetOf(n).slice(0, 70)) || '（空笔记）'}</div>
+      <div class="m"><span>${fmt(n.updatedAt)}</span><span>${esc(n.bookId || '默认')}</span>${(n.tags || []).map(t => '<span>#' + esc(t) + '</span>').join('')}</div>
+    </div>`).join('') || '<div class="empty">这里还没有笔记</div>';
+  $('#list').querySelectorAll('.item').forEach(el => el.onclick = () => open(el.dataset.id));
+}
+function open(id) {
+  if (dirty && selId) save(true);
+  selId = id;
+  const n = notes.get(id) || {};
+  $('#title').value = n.title || '';
+  $('#body').value = n.content || '';
+  $('#tagIn').value = (n.tags || []).join(', ');
+  $('#bookIn').value = n.bookId || '';
+  $('#pinBtn').textContent = n.pinned ? '取消置顶' : '置顶';
+  $('#delBtn').textContent = n.trashed ? '彻底删除' : '删除';
+  $('#wc').textContent = ($('#body').value || '').length + ' 字';
+  dirty = false; renderList();
+  if (previewing) renderPreview();
+  if (window.innerWidth <= 720) {
+    $('#app').classList.add('mobile-edit');
+    $('#backBtn').classList.remove('hide');
+  }
+}
+function md2html(src) {
+  let s = esc(src);
+  s = s.replace(/```([\s\S]*?)```/g, (m, c) => '<pre><code>' + c.trim() + '</code></pre>');
+  s = s.replace(/^###### (.*)$/gm, '<h6>$1</h6>').replace(/^##### (.*)$/gm, '<h5>$1</h5>')
+    .replace(/^#### (.*)$/gm, '<h4>$1</h4>').replace(/^### (.*)$/gm, '<h3>$1</h3>')
+    .replace(/^## (.*)$/gm, '<h2>$1</h2>').replace(/^# (.*)$/gm, '<h1>$1</h1>');
+  s = s.replace(/^&gt; ?(.*)$/gm, '<blockquote>$1</blockquote>');
+  s = s.replace(/^\s*[-*+] (.*)$/gm, '<li>$1</li>')
+    .replace(/(<li>[\s\S]*?<\/li>)(?!\s*<li>)/g, '<ul>$1</ul>');
+  s = s.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+  s = s.replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>').replace(/\*([^*\n]+)\*/g, '<i>$1</i>');
+  s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g,
+    (m, alt, url) => '<img src="' + esc(url) + '" alt="' + esc(alt) + '">');
+  s = s.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  s = s.split(/\n{2,}/).map(b => /^<(h\d|ul|ol|pre|blockquote|img)/.test(b.trim()) ? b
+    : '<p>' + b.replace(/\n/g, '<br>') + '</p>').join('\n');
+  return s;
+}
+function renderPreview() {
+  $('#preview').innerHTML = md2html($('#body').value) || '<p style="color:var(--hint)">（空）</p>';
+}
+function setMode(pv) {
+  previewing = pv;
+  $('#body').classList.toggle('hide', pv);
+  $('#preview').classList.toggle('hide', !pv);
+  $('#pvBtn').classList.toggle('pri', pv);
+  $('#editBtn').classList.toggle('pri', !pv);
+  if (pv) renderPreview();
+}
+function curNote() {
+  const now = Date.now();
+  let n = notes.get(selId);
+  if (!n) n = { id: 'w-' + now.toString(36) + '-' + Math.random().toString(36).slice(2, 8),
+    tags: [], createdAt: now, trashed: false, pinned: false };
+  n.title = $('#title').value.trim() || titleOf({ content: $('#body').value });
+  n.content = $('#body').value;
+  n.tags = $('#tagIn').value.split(/[,，]/).map(s => s.trim()).filter(Boolean);
+  n.bookId = $('#bookIn').value.trim() || '网页新建';
+  n.pinned = !!n.pinned;
+  n.trashed = !!n.trashed;
+  n.updatedAt = now;
+  return n;
+}
+function save(silent) {
+  const n = curNote();
+  notes.set(n.id, n); selId = n.id;
+  return api('/api/note', { method: 'POST', body: JSON.stringify({ note: n }) })
+    .then(r => {
+      rev = r.rev; $('#rev').textContent = 'rev ' + rev;
+      renderNav(); renderList();
+      $('#lastSave').textContent = '已保存 ' + fmt(n.updatedAt); dirty = false;
+      if (!silent) toast('已保存');
+    })
+    .catch(e => { flash('保存失败：' + e.message); if (!silent) toast('保存失败'); });
+}
+function load(full) {
+  return api('/api/state' + (full ? '' : '?since=' + rev)).then(d => {
+    if (typeof d === 'string') d = JSON.parse(d);
+    if (d.unchanged) return;
+    rev = d.rev; $('#rev').textContent = 'rev ' + rev;
+    // 另一端执行了「一键清空」：本地也要清，否则下次同步会把旧笔记推回去
+    const ep = d.epoch || 0;
+    if (ep > 0 && ep !== epoch) {
+      notes.clear(); selId = null;
+      $('#title').value = ''; $('#body').value = '';
+      $('#tagIn').value = ''; $('#bookIn').value = '';
+      toast('另一端已清空全部笔记');
+    }
+    epoch = ep;
+    (d.notes || []).forEach(n => { if (n && n.id) notes.set(n.id, n); });
+    renderNav(); renderList();
+    if (!selId && notes.size) {
+      const first = [...notes.values()].filter(n => !n.trashed)
+        .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))[0];
+      if (first) open(first.id);
+    }
+  }).catch(e => flash('拉取失败：' + e.message));
+}
+function connect() {
+  if (es) es.close();
+  es = new EventSource('/api/events' + (token ? '?token=' + encodeURIComponent(token) : ''));
+  es.onopen = () => { $('#liveDot').classList.remove('off'); $('#liveTxt').textContent = '实时同步已连接'; };
+  es.onmessage = e => { try { const d = JSON.parse(e.data); if (d.rev && d.rev !== rev) load(false); } catch (_) {} };
+  es.onerror = () => { $('#liveDot').classList.add('off'); $('#liveTxt').textContent = '连接中断，重试中'; };
+}
+function newNote() {
+  if (dirty && selId) save(true);
+  const id = 'w-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
+  notes.set(id, { id, bookId: view.startsWith('book:') ? view.slice(5) : '网页新建',
+    title: '', content: '', tags: [], pinned: false, trashed: false,
+    createdAt: Date.now(), updatedAt: Date.now() });
+  view = 'all'; renderNav(); open(id); setMode(false); $('#title').focus();
+  toast('已新建笔记');
+}
+function confirmBox(title, text, ok) {
+  $('#trashTitle').textContent = title; $('#trashText').textContent = text;
+  $('#trashMask').classList.remove('hide');
+  $('#trashOk').onclick = () => { $('#trashMask').classList.add('hide'); ok(); };
+  $('#trashCancel').onclick = () => $('#trashMask').classList.add('hide');
+}
+function doDelete() {
+  if (!selId) return;
+  const n = notes.get(selId); if (!n) return;
+  if (n.trashed) {
+    confirmBox('彻底删除', '「' + titleOf(n) + '」将被永久删除，无法恢复。', () =>
+      api('/api/purge', { method: 'POST', body: JSON.stringify({ id: selId }) })
+        .then(() => { notes.delete(selId); selId = null; $('#title').value = ''; $('#body').value = '';
+          renderNav(); renderList(); toast('已彻底删除'); }));
+  } else {
+    confirmBox('删除到回收站', '「' + titleOf(n) + '」将移入回收站，可随时还原。', () =>
+      api('/api/delete', { method: 'POST', body: JSON.stringify({ id: selId }) })
+        .then(() => { n.trashed = true; renderNav(); renderList(); toast('已移入回收站'); }));
+  }
+}
+function restore() {
+  if (!selId) return;
+  return api('/api/restore', { method: 'POST', body: JSON.stringify({ id: selId }) })
+    .then(() => { notes.get(selId).trashed = false; view = 'all'; renderNav(); renderList(); toast('已还原'); });
+}
+function showGallery() {
+  const refs = [];
+  const re = /!\[([^\]]*)\]\(([^)\s]+)\)/g; let m;
+  while ((m = re.exec($('#body').value)) !== null) refs.push({ alt: m[1], url: m[2] });
+  if (!refs.length) { toast('当前笔记里还没有图片'); return; }
+  $('#gallery').innerHTML = refs.map(r =>
+    '<figure><img src="' + esc(r.url) + '" alt="' + esc(r.alt) + '">' +
+    '<figcaption>' + esc(r.alt || r.url) + '</figcaption></figure>').join('');
+  $('#galleryMask').classList.remove('hide');
+}
+function uploadImage(file) {
+  if (!file) return;
+  toast('正在上传图片…');
+  fetch('/api/upload', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream',
+      'X-File-Name': encodeURIComponent(file.name),
+      ...(token ? { 'Authorization': 'Bearer ' + token } : {}) },
+    body: file
+  }).then(r => r.json()).then(d => {
+    if (!d.ok) throw new Error(d.error || '上传失败');
+    const ta = $('#body'); const pos = ta.selectionStart || ta.value.length;
+    const ins = '![](' + d.url + ')';
+    ta.value = ta.value.slice(0, pos) + ins + ta.value.slice(pos);
+    ta.selectionStart = ta.selectionEnd = pos + ins.length;
+    dirty = true; $('#wc').textContent = ta.value.length + ' 字';
+    toast('图片已插入'); save(true);
+  }).catch(e => toast('上传失败：' + e.message));
+}
+
+// ---- 事件绑定 ----
+$('#clearAllBtn').onclick = () => confirmBox(
+  '清空所有笔记',
+  '将永久删除全部笔记（含回收站）并同步到桌面版，此操作不可恢复。',
+  () => api('/api/clear', { method: 'POST', body: '{}' }).then(d => {
+    epoch = d.epoch || epoch;
+    rev = d.rev || rev;
+    notes.clear(); selId = null;
+    $('#title').value = ''; $('#body').value = '';
+    $('#tagIn').value = ''; $('#bookIn').value = '';
+    renderNav(); renderList(); toast('已清空全部笔记');
+    return load(true);
+  }).catch(e => toast('清空失败：' + e.message)));
+$('#newBtn').onclick = newNote;
+$('#reloadBtn').onclick = () => load(true);
+$('#backBtn').onclick = () => {
+  $('#app').classList.remove('mobile-edit');
+  $('#backBtn').classList.add('hide');
+};
+$('#saveBtn').onclick = () => save();
+$('#delBtn').onclick = doDelete;
+$('#pinBtn').onclick = () => {
+  if (!selId) return; const n = notes.get(selId); n.pinned = !n.pinned;
+  $('#pinBtn').textContent = n.pinned ? '取消置顶' : '置顶'; save(true);
+};
+$('#editBtn').onclick = () => setMode(false);
+$('#pvBtn').onclick = () => setMode(true);
+$('#imgBtn').onclick = showGallery;
+$('#galleryClose').onclick = () => $('#galleryMask').classList.add('hide');
+$('#galleryMask').onclick = e => { if (e.target.id === 'galleryMask') $('#galleryMask').classList.add('hide'); };
+$('#uploadBtn').onclick = () => $('#imgFile').click();
+$('#imgFile').onchange = e => { uploadImage(e.target.files[0]); e.target.value = ''; };
+$('#importBtn').onclick = () => $('#mdFile').click();
+$('#mdFile').onchange = e => {
+  const f = e.target.files[0]; if (!f) return;
+  const r = new FileReader();
+  r.onload = () => {
+    const id = 'w-' + Date.now().toString(36);
+    notes.set(id, { id, bookId: '导入笔记', title: f.name.replace(/\.(md|markdown|txt)$/i, ''),
+      content: String(r.result), tags: [], pinned: false, trashed: false,
+      createdAt: Date.now(), updatedAt: Date.now() });
+    view = 'all'; renderNav(); open(id); save().then(() => toast('已导入 ' + f.name));
+  };
+  r.readAsText(f); e.target.value = '';
+};
+$('#q').oninput = renderList;
+$('#body').oninput = () => {
+  dirty = true; $('#wc').textContent = $('#body').value.length + ' 字';
+  if (previewing) renderPreview();
+  clearTimeout(window._t); window._t = setTimeout(() => save(true), 1200);
+};
+$('#title').oninput = () => { dirty = true; clearTimeout(window._t); window._t = setTimeout(() => save(true), 1200); };
+$('#tagIn').oninput = () => { dirty = true; clearTimeout(window._t); window._t = setTimeout(() => save(true), 1200); };
+$('#bookIn').oninput = () => { dirty = true; clearTimeout(window._t); window._t = setTimeout(() => save(true), 1200); };
+document.addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); save(); }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'n') { e.preventDefault(); newNote(); }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') { e.preventDefault(); $('#q').focus(); }
+  if (e.key === 'Escape') { $('#galleryMask').classList.add('hide'); $('#trashMask').classList.add('hide'); }
+  if (e.key === 'F2' && selId && notes.get(selId) && notes.get(selId).trashed) restore();
+});
+// 回收站里双击条目直接还原
+$('#list').addEventListener('dblclick', e => {
+  const it = e.target.closest('.item'); if (!it) return;
+  if (view === 'trash') { selId = it.dataset.id; restore(); }
+});
+
+// ---- 中文右键菜单 ----
+// 浏览器原生菜单（Cut/Copy/Select all）的语言由浏览器界面语言决定，网页无法修改，
+// 因此这里接管 contextmenu，绘制中文菜单并自己实现剪切/复制/粘贴/全选/撤销/重做。
+const ctxMenu = $('#ctxMenu');
+let ctxEl = null, ctxEditable = null, ctxText = '', ctxSelStart = null, ctxSelEnd = null;
+function isEditable(el) {
+  if (!el || !el.tagName) return null;
+  if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT' || el.isContentEditable) return el;
+  return null;
+}
+function selectedText() {
+  const ed = isEditable(ctxEl);
+  if (ed && ed.selectionStart != null) return ed.value.slice(ed.selectionStart, ed.selectionEnd);
+  return String(window.getSelection() || '');
+}
+function hideCtx() { ctxMenu.classList.add('hide'); }
+function showCtx(e) {
+  ctxEl = e.target;
+  ctxEditable = isEditable(ctxEl);
+  ctxText = selectedText();
+  ctxSelStart = ctxSelEnd = null;
+  if (ctxEditable && ctxEditable.selectionStart != null) {
+    ctxSelStart = ctxEditable.selectionStart;
+    ctxSelEnd = ctxEditable.selectionEnd;
+  }
+  ctxMenu.querySelectorAll('.ctx-item').forEach(it => {
+    const a = it.dataset.a;
+    let dis = false;
+    if (!ctxEditable && (a === 'cut' || a === 'paste' || a === 'undo' || a === 'redo')) dis = true;
+    if ((a === 'cut' || a === 'copy') && !ctxText) dis = true;
+    it.classList.toggle('dis', dis);
+  });
+  ctxMenu.querySelector('[data-a="openimg"]').classList.toggle('hide',
+    !(ctxEl && ctxEl.tagName === 'IMG'));
+  ctxMenu.classList.remove('hide');
+  const w = ctxMenu.offsetWidth, h = ctxMenu.offsetHeight;
+  ctxMenu.style.left = Math.max(4, Math.min(e.clientX, window.innerWidth - w - 6)) + 'px';
+  ctxMenu.style.top = Math.max(4, Math.min(e.clientY, window.innerHeight - h - 6)) + 'px';
+}
+document.addEventListener('contextmenu', e => {
+  if (e.target.closest && e.target.closest('#ctxMenu')) { e.preventDefault(); return; }
+  showCtx(e);
+  e.preventDefault();
+});
+document.addEventListener('mousedown', e => {
+  if (!e.target.closest || !e.target.closest('#ctxMenu')) hideCtx();
+});
+window.addEventListener('blur', hideCtx);
+document.addEventListener('scroll', hideCtx, true);
+document.addEventListener('keydown', hideCtx, true);
+function fireInput(el) { if (el) el.dispatchEvent(new Event('input', { bubbles: true })); }
+async function copyText(txt) {
+  let ok = false;
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = txt; ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed;top:0;left:-9999px;opacity:0';
+    document.body.appendChild(ta); ta.select();
+    ok = document.execCommand('copy');
+    ta.remove();
+  } catch (_) {}
+  if (!ok && navigator.clipboard && navigator.clipboard.writeText) {
+    try { await navigator.clipboard.writeText(txt); ok = true; } catch (_) {}
+  }
+  return ok;
+}
+async function ctxAction(a) {
+  hideCtx();
+  const ed = ctxEditable;
+  try {
+    if (a === 'copy' || a === 'cut') {
+      if (!ctxText) { toast('请先选中要' + (a === 'copy' ? '复制' : '剪切') + '的内容'); return; }
+      const ok = await copyText(ctxText);
+      if (a === 'cut' && ok && ed && ctxSelStart != null) {
+        ed.focus({ preventScroll: true });
+        ed.value = ed.value.slice(0, ctxSelStart) + ed.value.slice(ctxSelEnd);
+        ed.selectionStart = ed.selectionEnd = ctxSelStart;
+        fireInput(ed);
+      }
+      toast(ok ? (a === 'copy' ? '已复制到剪贴板' : '已剪切到剪贴板')
+               : '复制未成功，请用快捷键 Ctrl+C / Ctrl+X');
+      return;
+    }
+    if (a === 'paste') {
+      let txt = '';
+      if (navigator.clipboard && navigator.clipboard.readText) {
+        try { txt = await navigator.clipboard.readText(); } catch (_) {}
+      }
+      if (txt && ed) {
+        ed.focus({ preventScroll: true });
+        const s = ctxSelStart == null ? ed.value.length : ctxSelStart;
+        const t2 = ctxSelEnd == null ? ed.value.length : ctxSelEnd;
+        ed.value = ed.value.slice(0, s) + txt + ed.value.slice(t2);
+        ed.selectionStart = ed.selectionEnd = s + txt.length;
+        fireInput(ed); toast('已粘贴');
+      } else toast('浏览器限制读取剪贴板，请按 Ctrl+V 粘贴');
+      return;
+    }
+    if (a === 'selectall') {
+      if (ed) { ed.focus({ preventScroll: true }); ed.select(); }
+      else {
+        const host = (ctxEl && ctxEl.closest && ctxEl.closest('#preview, .item, #right')) || document.body;
+        const r = document.createRange(); r.selectNodeContents(host);
+        const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+      }
+      toast('已全选'); return;
+    }
+    if (a === 'undo' || a === 'redo') {
+      if (ed) ed.focus({ preventScroll: true });
+      document.execCommand(a); fireInput(ed); return;
+    }
+    if (a === 'openimg') {
+      if (ctxEl && ctxEl.tagName === 'IMG' && ctxEl.src) window.open(ctxEl.src, '_blank', 'noopener');
+      return;
+    }
+  } catch (err) { toast('操作失败：' + err.message); }
+}
+ctxMenu.addEventListener('click', e => {
+  const it = e.target.closest('.ctx-item');
+  if (!it || it.classList.contains('dis')) return;
+  ctxAction(it.dataset.a);
+});
+
+setMode(false);
+load(true).then(() => { connect(); setInterval(() => load(false), 15000); });
+</script>
+</body>
+</html>
