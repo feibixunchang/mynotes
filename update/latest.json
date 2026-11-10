@@ -5,14 +5,14 @@
     {
       "name": "MyNotes-1.3.5-macOS.dmg",
       "browser_download_url": "https://github.com/feibixunchang/mynotes/releases/download/v1.3.5/MyNotes-1.3.5-macOS.dmg",
-      "size": 0,
-      "digest": ""
+      "size": 23538050,
+      "digest": "sha256:bcc8f18034c67b5b4d61463f3d9fbe80a9424b8244bbe3ab0d152f5b31371678"
     },
     {
       "name": "mynotes-1.3.5-windows-x64-portable-clean.zip",
       "browser_download_url": "https://github.com/feibixunchang/mynotes/releases/download/v1.3.5/mynotes-1.3.5-windows-x64-portable-clean.zip",
-      "size": 0,
-      "digest": ""
+      "size": 14242553,
+      "digest": "sha256:ceed0c51183e13e2ac29fd177f313195e5720db3c804ef1c1cb65049d17582de"
     }
   ]
 }
