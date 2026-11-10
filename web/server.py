@@ -35,8 +35,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
 TOKEN = os.environ.get("SYNC_TOKEN", "")
 PORT = int(os.environ.get("PORT", "8000"))
-APP_VERSION = "1.3.4"
-BUILD_STAMP = "2026-11-09 23:20"
+APP_VERSION = "1.3.6"
+BUILD_STAMP = "2026-11-10 21:10"
 STATE = os.path.join(DATA_DIR, "state.json")
 LEGACY = os.path.join(DATA_DIR, "snapshot.json")
 MD_DIR = os.path.join(DATA_DIR, "md")

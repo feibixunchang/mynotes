@@ -7,13 +7,23 @@ import 'package:my_notes/pages/settings_page.dart';
 import 'package:my_notes/sync.dart';
 
 /// 回归测试：回收站里的笔记「彻底删除 / 清空」后不能被同步重新拉回。
-/// 运行时用 MYNOTES_DATA 指向临时目录，绝不会碰到真实笔记库：
-///   MYNOTES_DATA=$(mktemp -d) flutter test test/trash_sync_test.dart
+/// 用 NotesDb.testDataDirOverride 强制写入临时目录：即使直接执行
+/// `flutter test`，也绝不会碰到真实笔记库或改掉同步设置。
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  test('旧服务端仍持有已删除笔记时，pull 不会把它插回本地', () async {
+  late Directory tmpDir;
+  setUpAll(() async {
+    tmpDir = await Directory.systemTemp.createTemp('mynotes-test-');
+    NotesDb.testDataDirOverride = tmpDir.path;
     await NotesDb.init();
+  });
+  tearDownAll(() {
+    NotesDb.testDataDirOverride = null;
+    if (tmpDir.existsSync()) tmpDir.deleteSync(recursive: true);
+  });
+
+  test('旧服务端仍持有已删除笔记时，pull 不会把它插回本地', () async {
     final note = await NotesDb.createNote(null);
     note.title = '待彻底删除';
     note.body = '回归测试内容';

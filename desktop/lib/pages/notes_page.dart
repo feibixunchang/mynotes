@@ -40,6 +40,7 @@ class _NotesPageState extends State<NotesPage> {
   String? _selectedNoteId;
   Timer? _searchTimer;
   late final ValueNotifier<(double, double)> _paneWidths;
+  bool _refreshing = false;
 
   @override
   void initState() {
@@ -80,6 +81,36 @@ class _NotesPageState extends State<NotesPage> {
     _refreshBooks();
     _refreshTrashCount();
     _applyView();
+  }
+
+  /// 手动刷新：先推本地改动、再拉一次远端，最后强制重刷三栏。
+  /// 未配置同步地址时退化为纯本地重载，不会把状态栏写成「同步失败」。
+  Future<void> _manualRefresh() async {
+    if (_refreshing) return;
+    setState(() => _refreshing = true);
+    final online = SyncService.i.baseUrl.isNotEmpty;
+    try {
+      if (online) {
+        await SyncService.i.push();
+        await SyncService.i.pull(silent: false);
+      }
+      await _refreshBooks();
+      await _applyView();
+      await _refreshTrashCount();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(online ? '已刷新 · ${SyncService.i.resultText}' : '已刷新本地笔记'),
+          duration: const Duration(seconds: 2),
+        ));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('刷新失败：$e')));
+      }
+    } finally {
+      if (mounted) setState(() => _refreshing = false);
+    }
   }
 
   Future<void> _refreshTrashCount() async {
@@ -374,6 +405,15 @@ class _NotesPageState extends State<NotesPage> {
                         const Expanded(
                             child: Text('我的笔记',
                                 style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold))),
+                        IconButton(
+                            icon: _refreshing
+                                ? const SizedBox(
+                                    width: 16,
+                                    height: 16,
+                                    child: CircularProgressIndicator(strokeWidth: 2))
+                                : const Icon(Icons.refresh, size: 18),
+                            tooltip: '刷新（重新同步并重载笔记）',
+                            onPressed: _refreshing ? null : _manualRefresh),
                         IconButton(
                             icon: const Icon(Icons.file_download_outlined, size: 18),
                             tooltip: '导入笔记（Simplenote / Markdown）',

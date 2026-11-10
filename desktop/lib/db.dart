@@ -96,6 +96,10 @@ class NotesDb {
   static Database? _db;
   static String? _dataDir;
 
+  /// 仅供单元测试注入：设置后数据目录固定为它，绝不写进真实笔记库。
+  /// 生产代码不会设置这个字段。
+  static String? testDataDirOverride;
+
   static String get dataDir => _dataDir!;
   static String get attachmentsDir => p.join(_dataDir!, 'attachments');
 
@@ -119,6 +123,11 @@ class NotesDb {
   }
 
   static Future<String> resolveDataDir() async {
+    final override = testDataDirOverride;
+    if (override != null && override.isNotEmpty) {
+      await Directory(override).create(recursive: true);
+      return override;
+    }
     final env = Platform.environment['MYNOTES_DATA'];
     if (env != null && env.isNotEmpty) return p.join(env, 'notes-data');
     // 便携优先：程序目录/data；不可写则退回用户目录

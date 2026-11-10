@@ -17,7 +17,13 @@ body{background:var(--bg);color:var(--txt);
   font-family:'FZSongHei','Microsoft YaHei',sans-serif;font-size:16px;font-weight:500}
 button,input,select,textarea{font-family:'FZSongHei','Microsoft YaHei',sans-serif}
 button{font-weight:600}
-#app{display:flex;flex-direction:row;align-items:stretch;width:100%;height:100vh;height:100dvh;overflow:hidden}
+/* 手动刷新时的旋转反馈 */
+#reloadBtn.spin span{display:inline-block;animation:mnspin .7s linear infinite}
+#reloadBtn:disabled{opacity:.6;cursor:default}
+@keyframes mnspin{to{transform:rotate(360deg)}}
+#app{display:flex;flex-direction:column;width:100%;height:100vh;height:100dvh;overflow:hidden}
+/* 三栏放在 #cols 里，底部状态栏独立一行：手机上隐藏右栏时状态栏仍然可见 */
+#cols{display:flex;flex-direction:row;align-items:stretch;flex:1;min-height:0;width:100%}
 .col{display:flex;flex-direction:column;min-height:0}
 #left{width:250px;flex:none;background:var(--panel);border-right:1px solid var(--line)}
 #mid{width:330px;flex:none;background:var(--panel);border-right:1px solid var(--line)}
@@ -180,6 +186,7 @@ input,textarea,select{font-family:inherit;font-size:16px;font-weight:500;color:v
 <body>
 <div id="app">
   <div id="drawerMask"></div>
+  <div id="cols">
   <div id="left" class="col">
     <div class="head"><span class="logo">笔</span>我的笔记</div>
     <div class="pad"><button class="btn pri" id="newBtn" style="width:100%">＋ 新建笔记</button></div>
@@ -195,7 +202,7 @@ input,textarea,select{font-family:inherit;font-size:16px;font-weight:500;color:v
 
   <div id="mid" class="col">
     <div class="head"><button class="btn ghost only-mobile" id="menuBtn" title="菜单">☰</button><span id="listTitle">全部笔记</span><span class="sp"></span>
-      <button class="btn ghost" id="reloadBtn" title="重新拉取">⟳</button>
+      <button class="btn ghost" id="reloadBtn" title="刷新：重新拉取全部笔记" aria-label="刷新"><span>⟳</span></button>
       <button class="btn ghost hide" id="backBtn" title="返回列表">✕</button></div>
     <div class="pad"><input id="q" placeholder="搜索标题或正文…"></div>
     <div class="list" id="list"></div>
@@ -203,6 +210,7 @@ input,textarea,select{font-family:inherit;font-size:16px;font-weight:500;color:v
 
   <div id="right" class="col">
     <div id="bar">
+      <button class="btn ghost only-mobile" id="backBtnM" title="返回列表">←</button>
       <button class="btn" id="editBtn">编辑</button>
       <button class="btn" id="pvBtn">预览</button>
       <button class="btn" id="imgBtn">看图</button>
@@ -223,14 +231,15 @@ input,textarea,select{font-family:inherit;font-size:16px;font-weight:500;color:v
     </div>
     <textarea id="body" placeholder="开始写吧…支持 Markdown，可插入图片"></textarea>
     <div id="preview" class="hide"></div>
-    <div id="status">
-      <span><i class="dot off" id="liveDot"></i><span id="liveTxt">连接中…</span></span>
-      <span id="cnt">笔记 0 条</span>
-      <span id="lastSave">尚未保存</span>
-      <span class="sp"></span>
-      <span id="ver" style="font-weight:700;color:#b45309">v1.3.4 · 2026-11-09 23:20</span>
-      <span id="rev">rev -</span>
-    </div>
+  </div>
+  </div>
+  <div id="status">
+    <span><i class="dot off" id="liveDot"></i><span id="liveTxt">连接中…</span></span>
+    <span id="cnt">笔记 0 条</span>
+    <span id="lastSave">尚未保存</span>
+    <span class="sp"></span>
+    <span id="ver" style="font-weight:700;color:#b45309">v…</span>
+    <span id="rev">rev -</span>
   </div>
 </div>
 
@@ -471,9 +480,17 @@ function load(full) {
       toast('另一端已清空全部笔记');
     }
     epoch = ep;
+    // 服务端删除墓碑：已被彻底删除的笔记，网页版也要从内存清掉，
+    // 否则桌面端删掉的笔记仍会留在网页版列表里。
+    (d.deletedIds || []).forEach(id => notes.delete(id));
+    // 手动/首次全量拉取时，以服务端为准清掉本地残留（有未保存编辑时跳过）。
+    if (full && !dirty) {
+      const keep = new Set((d.notes || []).map(n => n && n.id).filter(Boolean));
+      [...notes.keys()].forEach(id => { if (!keep.has(id)) notes.delete(id); });
+    }
     (d.notes || []).forEach(n => { if (n && n.id) notes.set(n.id, n); });
     renderNav(); renderList();
-    if (!selId && notes.size) {
+    if (!selId && notes.size && !isNarrow()) {
       const first = [...notes.values()].filter(n => !n.trashed)
         .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))[0];
       if (first) open(first.id);
@@ -565,7 +582,25 @@ $('#clearAllBtn').onclick = () => confirmBox(
     return load(true);
   }).catch(e => toast('清空失败：' + e.message)));
 $('#newBtn').onclick = newNote;
-$('#reloadBtn').onclick = () => load(true);
+// 手动刷新：重新拉取全部笔记，带旋转反馈，避免连点重复请求。
+let refreshing = false;
+$('#reloadBtn').onclick = () => {
+  if (refreshing) return;
+  refreshing = true;
+  const b = $('#reloadBtn');
+  b.disabled = true; b.classList.add('spin');
+  const t0 = Date.now();
+  load(true)
+    .then(() => toast('已刷新 · 共 ' + notes.size + ' 条'))
+    .catch(e => toast('刷新失败：' + e.message))
+    .finally(() => {
+      const wait = Math.max(0, 350 - (Date.now() - t0));
+      setTimeout(() => {
+        refreshing = false;
+        b.disabled = false; b.classList.remove('spin');
+      }, wait);
+    });
+};
 // ---- 手机端：左栏抽屉 + 系统返回键 ----
 const appEl = $('#app');
 const isNarrow = () => window.innerWidth <= 720;
@@ -586,6 +621,8 @@ function leaveEditor(fromPop) {
 $('#menuBtn').onclick = openDrawer;
 $('#drawerMask').onclick = closeDrawer;
 $('#backBtn').onclick = () => leaveEditor(false);
+// 手机上进正文后列表栏被隐藏，✕ 跟着一起不见了，所以工具栏里再放一个返回
+$('#backBtnM').onclick = () => leaveEditor(false);
 // 安卓返回键 / 浏览器后退：从编辑页回到列表，而不是直接退出网页
 window.addEventListener('popstate', () => {
   if (appEl.classList.contains('mobile-edit')) leaveEditor(true);
@@ -769,6 +806,10 @@ ctxMenu.addEventListener('click', e => {
 });
 
 setMode(false);
+// 版本号只由服务端 /health 维护，前端不再硬编码，避免两端版本不一致。
+api('/health').then(h => {
+  $('#ver').textContent = 'v' + (h.version || '?') + (h.build ? ' · ' + h.build : '');
+}).catch(() => {});
 load(true).then(() => { connect(); setInterval(() => load(false), 15000); });
 </script>
 </body>
