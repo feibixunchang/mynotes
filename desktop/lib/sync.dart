@@ -113,7 +113,9 @@ class SyncService extends ChangeNotifier {
   int _epoch = int.tryParse(SettingsStore.readSync('syncEpoch', '-1')) ?? -1;
   bool _dirty = false;
   bool _pushing = false;
+  bool _pulling = false;
   Timer? _pushTimer;
+  Timer? _ssePullTimer;
   Timer? _poll;
   HttpClient? _sseClient;
 
@@ -129,11 +131,10 @@ class SyncService extends ChangeNotifier {
     // 每 30 秒兜底：脏数据就上推；否则轻量拉取（服务端 unchanged 直接返回空）。
     // 这样启动瞬间的短暂失败会在下一轮自动恢复，状态栏不会长期挂着红色错误。
     _poll = Timer.periodic(const Duration(seconds: 30), (_) async {
-      if (_dirty) {
-        await push();
-      } else {
-        await pull(silent: true);
-      }
+      if (_dirty) await push();
+      // 无论本地是否有改动都要拉一次：push 不再推进 _rev，远端删除
+      // （含 SSE 断线期间漏掉的）在这里也能被兜住，不必等下一次 rev 变化。
+      await pull(silent: true);
     });
     Timer(const Duration(seconds: 2), () async {
       await pull(silent: true);
@@ -183,7 +184,10 @@ class SyncService extends ChangeNotifier {
       }
       if (res["ok"] == true) {
         _dirty = false;
-        _rev = (res["rev"] as num?)?.toInt() ?? _rev;
+        // 关键：push 的响应 rev 只表示「服务端处理到哪一次变更」，不代表本端
+        // 已经看到该 rev 里的远端改动（尤其是彻底删除）。若在这里推进 _rev，
+        // 紧随其后的 pull() 会命中 unchanged 短路，删除列表永远收不到。
+        // _rev 只允许由 pull() 的成功响应推进。
         lastOk = true;
         resultText = '已同步 ${all.length} 条';
         // 服务端确认已处理删除列表后，本地墓碑即可清掉。
@@ -207,7 +211,7 @@ class SyncService extends ChangeNotifier {
   Future<bool> clearRemote() async {
     final res = await _send('POST', '/api/clear', '{}');
     if (res != null && res['ok'] == true) {
-      _rev = (res['rev'] as num?)?.toInt() ?? _rev;
+      // 同 push()：不推进 _rev，下一次 pull() 会以全量确认清空结果。
       _epoch = (res['epoch'] as num?)?.toInt() ?? _epoch;
       await SettingsStore.write('syncEpoch', '$_epoch');
       _dirty = false;
@@ -260,15 +264,37 @@ class SyncService extends ChangeNotifier {
 
   // ---------- 拉取合并 ----------
 
-  Future<void> pull({bool silent = true}) async {
+  /// full=true 时不带 since，强制取服务端全量快照（手动刷新用）。
+  /// 服务端在 unchanged 响应里也会下发删除墓碑，所以必须先应用删除再判断
+  /// unchanged，否则「笔记没变、但有笔记在另一端被删掉」会被整个跳过。
+  Future<void> pull({bool silent = true, bool full = false}) async {
+    if (_pulling && !full) return;
+    _pulling = true;
     try {
-      final path = _rev >= 0 ? '/api/state?since=$_rev' : '/api/state';
+      final path = (!full && _rev >= 0) ? '/api/state?since=$_rev' : '/api/state';
       final res = await _send('GET', path, null);
       if (res == null) {
         if (!silent) _fail('无法连接同步服务');
         return;
       }
-      if (res["unchanged"] == true) return;
+      // 删除列表可能出现在 unchanged 响应里：先落地，再决定是否短路。
+      final remoteDeleted = ((res["deletedIds"] as List?) ?? const [])
+          .whereType<String>()
+          .toSet();
+      final purged = remoteDeleted.isEmpty
+          ? 0
+          : await NotesDb.purgeRemoteIds(remoteDeleted.toList());
+      if (res["unchanged"] == true) {
+        _rev = (res["rev"] as num?)?.toInt() ?? _rev;
+        if (purged > 0) {
+          atMs = DateTime.now().millisecondsSinceEpoch;
+          lastOk = true;
+          resultText = '已同步（移除 $purged 条已删除笔记）';
+          SyncService.dataVersion.value++;
+          notifyListeners();
+        }
+        return;
+      }
       _rev = (res["rev"] as num?)?.toInt() ?? _rev;
       // 另一端执行了「一键删除所有笔记」：本地必须同步清空，
       // 否则下次 push 会把已经删掉的笔记又推回服务端。
@@ -281,13 +307,7 @@ class SyncService extends ChangeNotifier {
         await SettingsStore.write('syncEpoch', '$remoteEpoch');
       }
       final remote = (res["notes"] as List?) ?? const [];
-      // 新版服务端下发的删除列表：本地同步删除。
-      final remoteDeleted = ((res["deletedIds"] as List?) ?? const [])
-          .whereType<String>()
-          .toSet();
-      if (remoteDeleted.isNotEmpty) {
-        await NotesDb.purgeRemoteIds(remoteDeleted.toList());
-      }
+      // remoteDeleted 已在 unchanged 判断之前解析并落地，这里直接复用。
       // 本机已永久删除的笔记，旧服务端仍会把它发回来；用墓碑挡住，
       // 否则「彻底删除 / 清空回收站」看起来永远删不掉。
       final tombs = await NotesDb.tombstones();
@@ -308,7 +328,7 @@ class SyncService extends ChangeNotifier {
           applied++;
         }
       }
-      if (remoteDeleted.isNotEmpty) applied++;
+      if (purged > 0) applied++;
       atMs = DateTime.now().millisecondsSinceEpoch;
       lastOk = true;
       lastError = null;
@@ -320,7 +340,17 @@ class SyncService extends ChangeNotifier {
       notifyListeners();
     } catch (_) {
       if (!silent) _fail('拉取异常');
+    } finally {
+      _pulling = false;
     }
+  }
+
+  /// 合并短时间内的多次 SSE 通知，避免一次批量改动触发多次全量拉取。
+  void _schedulePull() {
+    _ssePullTimer?.cancel();
+    _ssePullTimer = Timer(const Duration(milliseconds: 150), () {
+      unawaited(pull());
+    });
   }
 
   // ---------- SSE 实时监听 ----------
@@ -351,15 +381,12 @@ class SyncService extends ChangeNotifier {
         final lines = resp.transform(utf8.decoder).transform(const LineSplitter());
         await for (final line in lines) {
           if (line.startsWith('data: ')) {
-            final payload = line.substring(6);
-            if (payload.startsWith('{')) {
-              try {
-                final d = jsonDecode(payload);
-                final r = (d['rev'] as num?)?.toInt();
-                if (r != null && r != _rev) {
-                  unawaited(pull());
-                }
-              } catch (_) {}
+            final payload = line.substring(6).trim();
+            // 服务端 hello 是纯数字 rev（event: hello），变更事件是 JSON。
+            // 两者都触发一次拉取：断线重连靠 hello 补偿期间漏掉的变更；
+            // 变更事件也不再用 r != _rev 过滤，避免 rev 恰好相等时漏掉删除。
+            if (payload.startsWith('{') || RegExp(r'^\d+$').hasMatch(payload)) {
+              _schedulePull();
             }
           }
         }
@@ -376,6 +403,8 @@ class SyncService extends ChangeNotifier {
 
   void stop() {
     _pushTimer?.cancel();
+    _ssePullTimer?.cancel();
+    _ssePullTimer = null;
     _poll?.cancel();
     final c = _sseClient;
     _sseClient = null;

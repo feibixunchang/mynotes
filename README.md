@@ -7,22 +7,26 @@
 
 ## 直接下载（Windows，免编译）
 
-**[下载 v1.3.6 零数据便携版](https://github.com/feibixunchang/mynotes/releases/latest)** · Windows：`mynotes-1.3.6-windows-x64-portable-clean.zip` · macOS：`MyNotes-1.3.6-macOS.dmg`
+**[下载 v1.3.7](https://github.com/feibixunchang/mynotes/releases/latest)** · Windows 安装版：`MyNotes-1.3.7-Windows-x64-Setup.exe` · Windows 便携版：`mynotes-1.3.7-windows-x64-portable-clean.zip` · macOS：`MyNotes-1.3.7-macOS.dmg`
 
-> 使用自托管 NAS 网页版的朋友，请把 `web/server.py` 与 `web/index.html` 一并更新到 v1.3.6
-> （容器部署：替换这两个文件后重启容器即可），否则网页版不会遵守删除墓碑。
+> 使用自托管 NAS 网页版的朋友，请把 `web/server.py` 与 `web/index.html` 一并更新到 v1.3.7
+> （容器部署：替换这两个文件后重启容器即可），否则另一端删除的笔记不会即时消失。
 
-解压后双击 `my_notes.exe` 即可，无需安装、不写注册表。该包是一个**全新建的空笔记库**：不含任何笔记、账号、令牌、内网地址、日志或附件，也不捆绑商业字体。
-首次启动会要求设置 4–6 位数字启动锁；同步默认为 `http://127.0.0.1:8000` 且令牌为空，可在「设置 → 同步」改成自己的服务地址。
-完整说明见压缩包内 `使用说明.txt`，发布包的逐项隐私审计结果见 Release 页面。
+Windows 提供两种用法：**安装版**运行 Setup 向导（中文界面，可选桌面快捷方式，卸载保留笔记）；**便携版**解压后双击 `my_notes.exe`，无需安装、不写注册表。从便携版换到安装版，把旧目录的 `notes-data` 整个复制到安装目录即可迁移笔记。
+两者都是**全新建的空笔记库**：不含任何笔记、账号、令牌、内网地址、日志或附件，也不捆绑商业字体（网页版统一使用系统默认字体）。
+首次启动会要求设置 4–6 位数字启动锁；同步地址与令牌在「设置 → 同步」里填写自己的服务。
+完整说明见包内 `使用说明.txt`，发布包的逐项隐私审计结果见 Release 页面。
 
 ## 功能
 
 - **自动更新（Windows / macOS）**：启动后自动检查官方 Release，多渠道并发测速选最快下载，
   校验 SHA-256 后自动安装并重启；「设置 → 自动更新」可关闭或手动检查。
   更新请求不含任何本机信息，只读取公开的 GitHub / CDN 地址
-- **手动刷新（Windows / macOS / 网页版）**：主页面一键重新同步并重载笔记列表，
-  桌面端先推后拉、网页版全量重取，不必等 30 秒轮询或 SSE 事件
+- **实时同步 + 手动刷新（Windows / macOS / 网页版）**：SSE 事件到达即拉取，
+  删除也会随 `unchanged` 响应兜底下发，不必等下一次笔记变更；主页面 `⟳`
+  一键全量重取并重载三栏。左栏回收站下方还有「打开发布页」直达更新日志
+- **Windows 安装向导**：中文安装界面、可选桌面快捷方式、开始菜单与卸载入口，
+  卸载不删除笔记数据；不使用安装向导也可用零数据便携版
 - **桌面版**：三栏布局、Markdown 编辑与预览、笔记本 / 标签 / 回收站、全文搜索、置顶、
   图片查看与插入、导入 Simplenote JSON / Markdown、系统托盘与全局热键 `Ctrl+Shift+Alt+N`
 - **启动锁**：首次启动强制设置 4–6 位数字密码，之后每次启动需解锁；
@@ -133,7 +137,7 @@ create-dmg --volname "我的笔记" --app-drop-link 480 170 --window-size 660 40
 公开分发则需要 Apple Developer 账号做 Developer ID 签名 + `xcrun notarytool` 公证。
 同步照常在「设置」里填自己的网页版地址即可。
 
-> 说明：**v1.3.5 起已提供经过 Mac 实机编译、签名与验收的 macOS DMG**（当前为 v1.3.6）
+> 说明：**v1.3.5 起已提供经过 Mac 实机编译、签名与验收的 macOS DMG**（当前为 v1.3.7）
 > （应用显示名为「我的笔记」，ad-hoc 签名，未做 Developer ID 签名与公证；
 > 首次打开若被 Gatekeeper 拦截，执行 `xattr -cr "/Applications/我的笔记.app"`）。
 >

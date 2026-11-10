@@ -6,16 +6,18 @@
 <title>我的笔记 · NAS 网页版</title>
 <link rel="icon" href="/favicon.ico">
 <style>
-@font-face{font-family:'FZSongHei';src:url('/font.ttf') format('truetype');font-display:swap}
 :root{
   --bg:#f4f5f9;--panel:#fff;--line:#e3e6ee;--txt:#1f2430;
   --sub:#374151;--hint:#465264;--acc:#4a5ee5;--orange:#f97316;--danger:#d33;
+  /* 一律使用操作系统默认 UI 字体，不再加载任何自定义字体 */
+  --font-ui:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",
+            "Hiragino Sans GB","Microsoft YaHei",sans-serif;
 }
 *{box-sizing:border-box}
 html,body{height:100%;margin:0}
 body{background:var(--bg);color:var(--txt);
-  font-family:'FZSongHei','Microsoft YaHei',sans-serif;font-size:16px;font-weight:500}
-button,input,select,textarea{font-family:'FZSongHei','Microsoft YaHei',sans-serif}
+  font-family:var(--font-ui);font-size:16px;font-weight:500}
+button,input,select,textarea{font-family:inherit}
 button{font-weight:600}
 /* 手动刷新时的旋转反馈 */
 #reloadBtn.spin span{display:inline-block;animation:mnspin .7s linear infinite}
@@ -360,6 +362,10 @@ function renderNav() {
   }
   html += '<div class="navtitle">其他</div>';
   html += '<div class="navitem ' + (view === 'trash' ? 'on' : '') + '" data-v="trash">🗑 回收站<span class="n">' + trashed + '</span></div>';
+  html += '<div class="navtitle">关于</div>';
+  html += '<a class="navitem" href="https://github.com/feibixunchang/mynotes/releases/latest"'
+        + ' target="_blank" rel="noopener" style="text-decoration:none" title="查看更新日志与安装包">'
+        + '🚀 打开发布页<span class="n">↗</span></a>';
   $('#nav').innerHTML = html;
   $('#nav').querySelectorAll('.navitem').forEach(el => el.onclick = () => {
     view = el.dataset.v; renderNav(); renderList();
@@ -469,7 +475,15 @@ function save(silent) {
 function load(full) {
   return api('/api/state' + (full ? '' : '?since=' + rev)).then(d => {
     if (typeof d === 'string') d = JSON.parse(d);
-    if (d.unchanged) return;
+    // 服务端在 unchanged 响应里也会带上删除墓碑：笔记没变，也可能有笔记
+    // 在另一端被彻底删除。必须先应用删除再短路，否则删除要等下一次 rev 变化。
+    if (d.unchanged) {
+      const gone = d.deletedIds || [];
+      let hit = false;
+      gone.forEach(id => { if (notes.delete(id)) hit = true; });
+      if (hit) { renderNav(); renderList(); }
+      return;
+    }
     rev = d.rev; $('#rev').textContent = 'rev ' + rev;
     // 另一端执行了「一键清空」：本地也要清，否则下次同步会把旧笔记推回去
     const ep = d.epoch || 0;
@@ -501,7 +515,11 @@ function connect() {
   if (es) es.close();
   es = new EventSource('/api/events' + (token ? '?token=' + encodeURIComponent(token) : ''));
   es.onopen = () => { $('#liveDot').classList.remove('off'); $('#liveTxt').textContent = '实时同步已连接'; };
-  es.onmessage = e => { try { const d = JSON.parse(e.data); if (d.rev && d.rev !== rev) load(false); } catch (_) {} };
+  // 任何变更事件都拉一次，不再用 d.rev !== rev 过滤：rev 恰好相等时
+  // 也可能有另一端刚写入的删除墓碑，unchanged 响应会把它们带回来。
+  es.onmessage = () => { load(false); };
+  // 服务端 hello 是 event: hello + 纯数字 rev：连接/重连时补偿断线期间漏掉的变更。
+  es.addEventListener('hello', () => { load(false); });
   es.onerror = () => { $('#liveDot').classList.add('off'); $('#liveTxt').textContent = '连接中断，重试中'; };
 }
 function newNote() {

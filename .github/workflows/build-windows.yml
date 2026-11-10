@@ -1,4 +1,4 @@
-name: Build Windows portable
+name: Build Windows releases
 
 # macOS 无法交叉编译 Windows 可执行文件，因此 Windows 便携包由 GitHub 的
 # Windows runner 自动构建。发布 Release 时自动触发，也可手动运行。
@@ -71,7 +71,10 @@ jobs:
           $readme = @(
             "我的笔记 v$ver - Windows 便携版",
             "",
-            "解压到任意目录，双击 my_notes.exe 即可使用；数据保存在同目录的 notes-data。",
+            "便携版：解压到任意目录，双击 my_notes.exe 即可使用；数据保存在同目录的 notes-data。",
+            "安装版：运行 MyNotes-*-Windows-x64-Setup.exe，按向导安装到当前用户目录，",
+            "        可勾选创建桌面快捷方式；卸载时不会删除 notes-data 里的笔记。",
+            "从便携版换到安装版：把旧目录里的 notes-data 整个复制到安装目录即可迁移笔记。",
             "首次启动会要求设置 4-6 位数字启动锁。",
             "同步（可选）：设置 -> 同步，填写你自己的 NAS 服务地址与令牌；留空则不联网同步。",
             "自动更新：设置 -> 自动更新，默认自动检查 GitHub 官方 Release、选最快渠道下载、校验 SHA-256 后自动安装。",
@@ -84,7 +87,48 @@ jobs:
           if (Test-Path $zip) { Remove-Item -Force $zip }
           Compress-Archive -Path $stage -DestinationPath $zip -CompressionLevel Optimal
           "zip=$zip" >> $env:GITHUB_OUTPUT
+          "stage=$stage" >> $env:GITHUB_OUTPUT
           Write-Host "Packed: $zip"
+
+      - name: Build Windows installer (Inno Setup wizard)
+        id: setup
+        shell: pwsh
+        run: |
+          $ver = '${{ steps.ver.outputs.version }}'
+          # GitHub windows-latest 镜像一般自带 Inno Setup 6；缺失时用 Chocolatey 补装。
+          $iscc = (Get-ChildItem -Path 'C:\Program Files*\Inno Setup*\ISCC.exe' -ErrorAction SilentlyContinue |
+                    Select-Object -First 1).FullName
+          if (-not $iscc) {
+            choco install innosetup --no-progress -y
+            $iscc = (Get-ChildItem -Path 'C:\Program Files*\Inno Setup*\ISCC.exe' -ErrorAction SilentlyContinue |
+                      Select-Object -First 1).FullName
+          }
+          if (-not $iscc) { throw 'Inno Setup 6 (ISCC.exe) not found' }
+          Write-Host "ISCC: $iscc"
+
+          $isccDir = Split-Path -Parent $iscc
+          $zh = Join-Path $isccDir 'Languages\ChineseSimplified.isl'
+          $iss = Get-Content -Raw -Encoding UTF8 'windows-installer\mynotes.iss'
+          if (-not (Test-Path $zh)) {
+            # 老版本没有简体中文语言包时退回英文界面，不让 CI 因语言包失败
+            $iss = $iss.Replace('compiler:Languages\ChineseSimplified.isl', 'compiler:Default.isl')
+            Write-Host 'ChineseSimplified.isl missing -> English wizard UI'
+          }
+          # Inno Setup 需要 UTF-8 BOM 才能正确解析中文；仓库里的 .iss 保持无 BOM 便于阅读。
+          $issOut = Join-Path (Get-Location) '_mynotes_setup.iss'
+          [System.IO.File]::WriteAllText($issOut, $iss, (New-Object System.Text.UTF8Encoding($true)))
+
+          $stage = '${{ steps.pkg.outputs.stage }}'
+          $icon = Join-Path (Get-Location) 'desktop\windows\runner\resources\app_icon.ico'
+          $outName = "MyNotes-$ver-Windows-x64-Setup"
+          & $iscc "/DMyAppVersion=$ver" "/DMyStage=$stage" "/DMyIcon=$icon" `
+                  "/O$env:RUNNER_TEMP" "/F$outName" $issOut
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+          Remove-Item -Force $issOut
+          $exe = Join-Path $env:RUNNER_TEMP "$outName.exe"
+          if (-not (Test-Path $exe)) { throw "Installer not produced: $exe" }
+          "exe=$exe" >> $env:GITHUB_OUTPUT
+          Write-Host "Built: $exe"
 
       - name: Resolve release tag
         id: tag
@@ -100,10 +144,10 @@ jobs:
           "tag=$tag" >> $env:GITHUB_OUTPUT
           Write-Host "Target release: $tag"
 
-      - name: Upload zip to release
+      - name: Upload portable zip and installer to release
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload '${{ steps.tag.outputs.tag }}' '${{ steps.pkg.outputs.zip }}' --clobber -R '${{ github.repository }}'
+          gh release upload '${{ steps.tag.outputs.tag }}' '${{ steps.pkg.outputs.zip }}' '${{ steps.setup.outputs.exe }}' --clobber -R '${{ github.repository }}'
           gh release view '${{ steps.tag.outputs.tag }}' --json assets --jq '.assets[].name' -R '${{ github.repository }}'

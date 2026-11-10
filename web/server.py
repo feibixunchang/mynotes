@@ -35,8 +35,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
 TOKEN = os.environ.get("SYNC_TOKEN", "")
 PORT = int(os.environ.get("PORT", "8000"))
-APP_VERSION = "1.3.6"
-BUILD_STAMP = "2026-11-10 21:10"
+APP_VERSION = "1.3.7"
+BUILD_STAMP = "2026-11-10 22:30"
 STATE = os.path.join(DATA_DIR, "state.json")
 LEGACY = os.path.join(DATA_DIR, "snapshot.json")
 MD_DIR = os.path.join(DATA_DIR, "md")
@@ -263,12 +263,19 @@ class H(BaseHTTPRequestHandler):
             except Exception:
                 since = -1
             with LOCK:
-                if since >= 0 and since == _state["rev"]:
-                    return self._json(200, {"rev": _state["rev"], "notes": [],
-                                            "unchanged": True})
                 cutoff = _now() - 365 * 24 * 3600 * 1000
                 deleted = {k: v for k, v in _state.get("deleted", {}).items()
                            if v > cutoff}
+                if since >= 0 and since == _state["rev"]:
+                    # 笔记没变不等于没有删除：删除墓碑仍要随 unchanged 下发。
+                    # 否则另一端要等下一次任意笔记变更（rev 再 +1）才能看到
+                    # 「已被彻底删除」，表现为删除很久才同步。
+                    return self._json(200, {"rev": _state["rev"],
+                                            "epoch": _state.get("epoch", 0),
+                                            "notes": [],
+                                            "unchanged": True,
+                                            "deletedIds": list(deleted.keys()),
+                                            "deletedAt": deleted})
                 return self._json(200, {"rev": _state["rev"],
                                         "epoch": _state.get("epoch", 0),
                                         "notes": list(_state["notes"].values()),

@@ -92,7 +92,7 @@ class _NotesPageState extends State<NotesPage> {
     try {
       if (online) {
         await SyncService.i.push();
-        await SyncService.i.pull(silent: false);
+        await SyncService.i.pull(silent: false, full: true);
       }
       await _refreshBooks();
       await _applyView();
@@ -110,6 +110,28 @@ class _NotesPageState extends State<NotesPage> {
       }
     } finally {
       if (mounted) setState(() => _refreshing = false);
+    }
+  }
+
+  /// 在默认浏览器里打开发布页（GitHub Releases）。
+  /// 不引入 url_launcher：URL 是代码里的常量，直接用系统命令，无注入风险。
+  static const String _releaseUrl =
+      'https://github.com/feibixunchang/mynotes/releases/latest';
+
+  Future<void> _openReleasePage() async {
+    try {
+      if (Platform.isMacOS) {
+        await Process.run('/usr/bin/open', [_releaseUrl]);
+      } else if (Platform.isWindows) {
+        await Process.run('rundll32', ['url.dll,FileProtocolHandler', _releaseUrl]);
+      } else {
+        await Process.run('xdg-open', [_releaseUrl]);
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('无法打开浏览器，请手动访问 GitHub 发布页')));
+      }
     }
   }
 
@@ -486,6 +508,18 @@ class _NotesPageState extends State<NotesPage> {
                             });
                             _applyView();
                           },
+                        ),
+                        Divider(height: 28, color: Theme.of(context).dividerColor),
+                        ListTile(
+                          dense: true,
+                          leading: const Icon(Icons.new_releases_outlined, size: 18),
+                          title: Text('打开发布页',
+                              style: TextStyle(fontSize: 15, color: kSubTextColor)),
+                          subtitle: Text('v$kAppVersion · 更新日志与安装包',
+                              style: TextStyle(fontSize: kFontTiny, color: kSubTextColor)),
+                          trailing: Icon(Icons.open_in_new, size: 14,
+                              color: kSubTextColor),
+                          onTap: _openReleasePage,
                         ),
                       ],
                     ),
