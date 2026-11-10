@@ -20,7 +20,11 @@ void main() {
   });
   tearDownAll(() {
     NotesDb.testDataDirOverride = null;
-    if (tmpDir.existsSync()) tmpDir.deleteSync(recursive: true);
+    // Windows 上 SQLite 仍持有临时库的文件句柄，删除目录可能抛
+    // PathAccessException；清理失败不影响测试结论，交给系统临时目录回收。
+    try {
+      if (tmpDir.existsSync()) tmpDir.deleteSync(recursive: true);
+    } catch (_) {}
   });
 
   test('旧服务端仍持有已删除笔记时，pull 不会把它插回本地', () async {
