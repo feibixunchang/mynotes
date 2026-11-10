@@ -105,6 +105,13 @@ class NotesDb {
     _dataDir = await resolveDataDir();
     await Directory(attachmentsDir).create(recursive: true);
     _db = await openDatabase(p.join(_dataDir!, 'notes.db'), version: 1, onCreate: _onCreate);
+    // 老库（version 1）没有墓碑表：这里补建，保证「彻底删除」后不会被同步重新拉回。
+    await _db!.execute('CREATE TABLE IF NOT EXISTS tombstones('
+        'id TEXT PRIMARY KEY, deleted_at INTEGER NOT NULL)');
+    // 墓碑保留一年；服务端确认删除后会被立即清掉，这里只是防止无限增长。
+    await _db!.delete('tombstones',
+        where: 'deleted_at < ?',
+        whereArgs: [DateTime.now().millisecondsSinceEpoch - 365 * 24 * 3600 * 1000]);
     // 保证至少存在一个笔记本（修复"新建笔记没反应"的关键兜底）
     if ((await queryAll('SELECT id FROM books')).isEmpty) {
       await createBook('我的笔记本', null, 'notebook');
@@ -178,6 +185,8 @@ CREATE TABLE note_tags(
   tag_id TEXT NOT NULL,
   PRIMARY KEY(note_id, tag_id));
 ''');
+    await db.execute('CREATE TABLE tombstones('
+        'id TEXT PRIMARY KEY, deleted_at INTEGER NOT NULL)');
   }
 
   static Database get db => _db!;
@@ -286,20 +295,77 @@ CREATE TABLE note_tags(
     await _db!.update('notes', {'trashed': 0, 'trash_at': 0}, where: 'id = ?', whereArgs: [id]);
   }
 
+  /// 永久删除：先写墓碑再删笔记，防止 NAS 服务端把旧笔记同步回来。
   static Future<void> purge(String id) async {
-    await _db!.delete('notes', where: 'id = ?', whereArgs: [id]);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await _db!.transaction((txn) async {
+      await txn.rawInsert(
+          'INSERT OR REPLACE INTO tombstones(id, deleted_at) VALUES(?, ?)',
+          [id, now]);
+      await txn.delete('note_tags', where: 'note_id = ?', whereArgs: [id]);
+      await txn.delete('notes', where: 'id = ?', whereArgs: [id]);
+    });
   }
 
-  static Future<void> clearTrash() async {
-    await _db!.delete('notes', where: 'trashed = 1');
+  /// 清空回收站：返回被删掉的 id，交给同步层立刻通知服务端。
+  static Future<List<String>> clearTrash() async {
+    final rows = await _db!.query('notes',
+        columns: ['id'], where: 'trashed = 1');
+    final ids = rows.map((r) => r['id'] as String).toList();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await _db!.transaction((txn) async {
+      await txn.rawInsert(
+          'INSERT OR REPLACE INTO tombstones(id, deleted_at) '
+          'SELECT id, ? FROM notes WHERE trashed = 1', [now]);
+      await txn.rawDelete('DELETE FROM note_tags WHERE note_id IN '
+          '(SELECT id FROM notes WHERE trashed = 1)');
+      await txn.delete('notes', where: 'trashed = 1');
+    });
+    return ids;
   }
 
   /// 一键删除所有笔记（含回收站）；保留笔记本与标签定义
   static Future<void> clearAllNotes() async {
+    final now = DateTime.now().millisecondsSinceEpoch;
     await _db!.transaction((txn) async {
+      await txn.rawInsert(
+          'INSERT OR REPLACE INTO tombstones(id, deleted_at) '
+          'SELECT id, ? FROM notes', [now]);
       await txn.delete('note_tags');
       await txn.delete('notes');
     });
+  }
+
+  /// 墓碑：本机已永久删除的笔记 id -> 删除时刻（毫秒）。
+  static Future<Map<String, int>> tombstones() async {
+    final rows = await _db!.query('tombstones', columns: ['id', 'deleted_at']);
+    return <String, int>{
+      for (final r in rows)
+        r['id'] as String: (r['deleted_at'] as num?)?.toInt() ?? 0
+    };
+  }
+
+  /// 服务端确认删除后清掉对应墓碑。
+  static Future<void> forgetTombstones(Iterable<String> ids) async {
+    if (ids.isEmpty) return;
+    await _db!.transaction((txn) async {
+      for (final id in ids) {
+        await txn.delete('tombstones', where: 'id = ?', whereArgs: [id]);
+      }
+    });
+  }
+
+  /// 新版服务端下发的删除列表：本地按 id 删除（幂等）。
+  static Future<int> purgeRemoteIds(List<String> ids) async {
+    if (ids.isEmpty) return 0;
+    var n = 0;
+    await _db!.transaction((txn) async {
+      for (final id in ids) {
+        n += await txn.delete('notes', where: 'id = ?', whereArgs: [id]);
+        await txn.delete('note_tags', where: 'note_id = ?', whereArgs: [id]);
+      }
+    });
+    return n;
   }
 
   static Future<void> moveNote(String id, String bookId) async {

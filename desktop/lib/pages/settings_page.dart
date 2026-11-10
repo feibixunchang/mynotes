@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -7,6 +8,7 @@ import '../app_version.dart';
 import '../biometrics.dart';
 import '../db.dart';
 import '../sync.dart';
+import '../updater.dart';
 
 class SettingsPage extends StatefulWidget {
   final void Function(String mode)? onThemeChanged;
@@ -96,6 +98,39 @@ class _SettingsPageState extends State<SettingsPage> {
       appBar: AppBar(title: const Text('设置')),
       body: ListView(
         children: [
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+            child: Text('自动更新',
+                style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+          ),
+          ValueListenableBuilder<UpdateState>(
+            valueListenable: UpdateService.i.state,
+            builder: (context, st, _) => SwitchListTile(
+              dense: true,
+              title: const Text('自动检查并安装更新',
+                  style: TextStyle(fontSize: 14)),
+              subtitle: Text(
+                '当前 v$kAppVersion · ${st.message.isEmpty ? '尚未检查' : st.message}\n'
+                '只从 GitHub 官方 Release 下载并校验 SHA-256，不上传任何本机信息',
+                style: const TextStyle(fontSize: 11),
+              ),
+              value: UpdateService.i.autoEnabled,
+              onChanged: (v) => setState(() => UpdateService.i.autoEnabled = v),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: OutlinedButton.icon(
+                icon: const Icon(Icons.system_update_alt, size: 16),
+                label: const Text('立即检查更新'),
+                onPressed: () =>
+                    unawaited(UpdateService.i.checkAndUpdate(manual: true)),
+              ),
+            ),
+          ),
+          const Divider(height: 40),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
             child: Text('外观主题', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
@@ -284,7 +319,8 @@ class _SettingsPageState extends State<SettingsPage> {
             dense: true,
             title: const Text('清空回收站', style: TextStyle(fontSize: 14, color: Colors.red)),
             onTap: () async {
-              await NotesDb.clearTrash();
+              final ids = await NotesDb.clearTrash();
+              SyncService.i.notifyDeleted(ids);
               if (mounted) Navigator.of(context).pop();
             },
           ),

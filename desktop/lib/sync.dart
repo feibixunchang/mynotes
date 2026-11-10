@@ -14,6 +14,9 @@ class SyncService extends ChangeNotifier {
   SyncService._();
   static final SyncService i = SyncService._();
 
+  /// 远端数据变化时递增，主界面据此刷新三栏列表与计数。
+  static final ValueNotifier<int> dataVersion = ValueNotifier<int>(0);
+
   static const String defaultUrl = "http://127.0.0.1:8000";
   static const String defaultToken = "";
 
@@ -150,6 +153,7 @@ class SyncService extends ChangeNotifier {
       final all = <Note>[];
       all.addAll(await NotesDb.listNotes('', trash: false));
       all.addAll(await NotesDb.listNotes('', trash: true));
+      final tombs = await NotesDb.tombstones();
       final body = jsonEncode({
         "notes": all
             .map((n) => {
@@ -165,7 +169,11 @@ class SyncService extends ChangeNotifier {
                   "updatedAt": n.updatedAt,
                 })
             .toList(),
-        "device": Platform.localHostname,
+        // 永久删除的墓碑要告知服务端，否则服务端不会删、下次 pull 又会把笔记送回来。
+        "deletedIds": tombs.keys.toList(),
+        "deletedAt": tombs,
+        // 不发送本机主机名或设备标识，避免任何可识别信息离开这台电脑。
+        "device": "desktop",
       });
       final res = await _send('POST', '/api/sync', body);
       atMs = DateTime.now().millisecondsSinceEpoch;
@@ -178,6 +186,10 @@ class SyncService extends ChangeNotifier {
         _rev = (res["rev"] as num?)?.toInt() ?? _rev;
         lastOk = true;
         resultText = '已同步 ${all.length} 条';
+        // 服务端确认已处理删除列表后，本地墓碑即可清掉。
+        if (res.containsKey('deletedApplied')) {
+          await NotesDb.forgetTombstones(tombs.keys);
+        }
       } else {
         lastOk = false;
         resultText = '同步失败：${res["error"] ?? "未知"}';
@@ -210,6 +222,42 @@ class SyncService extends ChangeNotifier {
     return false;
   }
 
+  /// 永久删除后立即告知服务端，避免 SSE / 轮询把旧笔记推回本地。
+  /// 新版服务端一次批量处理 deletedIds；旧版回退到逐条 /api/purge。
+  /// 全程后台执行，不阻塞界面。
+  void notifyDeleted(List<String> ids) {
+    final unique = ids.toSet().toList();
+    if (unique.isEmpty) return;
+    () async {
+      try {
+        await _notifyDeletedImpl(unique);
+      } catch (_) {}
+    }();
+  }
+
+  Future<void> _notifyDeletedImpl(List<String> ids) async {
+    if (baseUrl.isEmpty) return;
+    final res = await _send('POST', '/api/sync',
+        jsonEncode({'notes': <dynamic>[], 'deletedIds': ids}));
+    if (res != null && res.containsKey('deletedApplied')) {
+      await NotesDb.forgetTombstones(ids);
+      markDirty();
+      return;
+    }
+    // 旧版服务端不认识 deletedIds：逐条调用已有的 /api/purge，限制并发。
+    const batch = 6;
+    for (var i = 0; i < ids.length; i += batch) {
+      final end = i + batch > ids.length ? ids.length : i + batch;
+      final part = ids.sublist(i, end);
+      await Future.wait(part.map((id) async {
+        try {
+          await _send('POST', '/api/purge', jsonEncode({'id': id}));
+        } catch (_) {}
+      }));
+    }
+    markDirty();
+  }
+
   // ---------- 拉取合并 ----------
 
   Future<void> pull({bool silent = true}) async {
@@ -233,12 +281,24 @@ class SyncService extends ChangeNotifier {
         await SettingsStore.write('syncEpoch', '$remoteEpoch');
       }
       final remote = (res["notes"] as List?) ?? const [];
+      // 新版服务端下发的删除列表：本地同步删除。
+      final remoteDeleted = ((res["deletedIds"] as List?) ?? const [])
+          .whereType<String>()
+          .toSet();
+      if (remoteDeleted.isNotEmpty) {
+        await NotesDb.purgeRemoteIds(remoteDeleted.toList());
+      }
+      // 本机已永久删除的笔记，旧服务端仍会把它发回来；用墓碑挡住，
+      // 否则「彻底删除 / 清空回收站」看起来永远删不掉。
+      final tombs = await NotesDb.tombstones();
       var applied = 0;
       for (final item in remote) {
         if (item is! Map) continue;
         final id = item["id"] as String?;
-        if (id == null) continue;
+        if (id == null || remoteDeleted.contains(id)) continue;
         final ru = (item["updatedAt"] as num?)?.toInt() ?? 0;
+        final tombAt = tombs[id] ?? 0;
+        if (tombAt > 0 && tombAt >= ru) continue;
         final local = await NotesDb.getNote(id);
         if (local == null) {
           await NotesDb.importOne(Map<String, dynamic>.from(item));
@@ -248,11 +308,15 @@ class SyncService extends ChangeNotifier {
           applied++;
         }
       }
+      if (remoteDeleted.isNotEmpty) applied++;
       atMs = DateTime.now().millisecondsSinceEpoch;
       lastOk = true;
       lastError = null;
       resultText = applied > 0 ? '已同步（收到 $applied 条）' : '已同步';
-      if (applied > 0) _dirty = false;
+      if (applied > 0) {
+        _dirty = false;
+        SyncService.dataVersion.value++;
+      }
       notifyListeners();
     } catch (_) {
       if (!silent) _fail('拉取异常');

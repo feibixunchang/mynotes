@@ -17,6 +17,7 @@ import 'pages/notes_page.dart';
 import 'pages/settings_page.dart';
 import 'single_instance.dart';
 import 'sync.dart';
+import 'updater.dart';
 
 /// 托盘初始化诊断日志（写到数据目录，便于确认 Windows 上是否真的挂上了托盘图标）
 void _trayLog(String msg) {
@@ -212,6 +213,8 @@ Future<void> main() async {
   // ---- 局域网同步（NAS mynotes-sync 容器）----
   SyncService.i.start();
 
+  // 启动后自动检查更新（内部延迟执行，避开启动关键路径）
+  unawaited(UpdateService.i.autoCheck());
   runApp(_Root(initialNoteId: openId));
 }
 
@@ -307,7 +310,13 @@ class _RootState extends State<_Root> {
       // 小字不再因为细笔画 + 浅灰而发虚，按钮/状态栏与列表标题观感一致。
       builder: (context, child) => DefaultTextStyle(
         style: _themeMode == 'dark' ? kDefaultTextStyleDark : kDefaultTextStyle,
-        child: child ?? const SizedBox.shrink(),
+        child: Stack(
+          children: <Widget>[
+            Positioned.fill(child: child ?? const SizedBox.shrink()),
+            const Positioned(
+                left: 0, right: 0, bottom: 0, child: UpdateBanner()),
+          ],
+        ),
       ),
       home: LockGate(child: NotesPage(initialNoteId: widget.initialNoteId)),
     );

@@ -44,7 +44,7 @@ ATTACH_DIR = os.path.join(DATA_DIR, "attachments")
 LOCK = threading.Lock()
 SUBS = []
 
-_state = {"rev": 0, "notes": {}, "updatedAt": 0, "epoch": 0}
+_state = {"rev": 0, "notes": {}, "updatedAt": 0, "epoch": 0, "deleted": {}}
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -76,6 +76,7 @@ def load_state():
                 d = json.load(f)
             if isinstance(d, dict) and isinstance(d.get("notes"), dict):
                 d.setdefault("epoch", 0)
+                d.setdefault("deleted", {})
                 _state = d
                 return
             # 兼容 state.json 里 notes 为数组的旧格式
@@ -83,7 +84,8 @@ def load_state():
                 _state = {"rev": int(d.get("rev") or 1),
                           "notes": {n["id"]: n for n in d["notes"] if isinstance(n, dict) and n.get("id")},
                           "updatedAt": _now(),
-                          "epoch": int(d.get("epoch") or 0)}
+                          "epoch": int(d.get("epoch") or 0),
+                          "deleted": d.get("deleted") or {}}
                 save_state()
                 return
         except Exception:
@@ -98,7 +100,7 @@ def load_state():
                     notes[n["id"]] = n
         except Exception:
             pass
-    _state = {"rev": 1, "notes": notes, "updatedAt": _now()}
+    _state = {"rev": 1, "notes": notes, "updatedAt": _now(), "epoch": 0, "deleted": {}}
     save_state()
 
 
@@ -146,6 +148,9 @@ def merge_notes(items):
             continue
         old = _state["notes"].get(n["id"])
         new_up = int(n.get("updatedAt") or 0)
+        # 已被永久删除的笔记，旧客户端再推回来也不能复活（除非删除之后又有更新）。
+        if int(_state.get("deleted", {}).get(n["id"]) or 0) >= new_up:
+            continue
         if old is None or new_up >= int(old.get("updatedAt") or 0):
             _state["notes"][n["id"]] = n
             if old is None or (old.get("content") != n.get("content")
@@ -261,9 +266,14 @@ class H(BaseHTTPRequestHandler):
                 if since >= 0 and since == _state["rev"]:
                     return self._json(200, {"rev": _state["rev"], "notes": [],
                                             "unchanged": True})
+                cutoff = _now() - 365 * 24 * 3600 * 1000
+                deleted = {k: v for k, v in _state.get("deleted", {}).items()
+                           if v > cutoff}
                 return self._json(200, {"rev": _state["rev"],
                                         "epoch": _state.get("epoch", 0),
-                                        "notes": list(_state["notes"].values())})
+                                        "notes": list(_state["notes"].values()),
+                                        "deletedIds": list(deleted.keys()),
+                                        "deletedAt": deleted})
         if u.path == "/api/export.md":
             with LOCK:
                 parts = ["# 我的笔记（NAS 导出）\n"]
@@ -336,6 +346,9 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/clear":
             # 一键删除所有笔记：清空服务端并递增 epoch，桌面端 pull 时据此同步清空本地
             with LOCK:
+                now = _now()
+                for nid in list(_state["notes"].keys()):
+                    _state.setdefault("deleted", {})[nid] = now
                 _state["notes"] = {}
                 _state["epoch"] = int(_state.get("epoch", 0)) + 1
                 bump([])
@@ -346,14 +359,34 @@ class H(BaseHTTPRequestHandler):
             items = data.get("notes")
             if not isinstance(items, list):
                 return self._json(400, {"ok": False, "error": "notes must be list"})
+            deleted_ids = [x for x in (data.get("deletedIds") or [])
+                           if isinstance(x, str)]
+            deleted_at = data.get("deletedAt")
+            if not isinstance(deleted_at, dict):
+                deleted_at = {}
             with LOCK:
+                now = _now()
+                removed = []
+                for nid in deleted_ids:
+                    ts = int(deleted_at.get(nid) or now)
+                    if nid in _state["notes"] or ts > int(
+                            _state.get("deleted", {}).get(nid) or 0):
+                        _state["notes"].pop(nid, None)
+                        _state.setdefault("deleted", {})[nid] = ts
+                        removed.append(nid)
+                cutoff = now - 365 * 24 * 3600 * 1000
+                _state["deleted"] = {
+                    k: v for k, v in _state.get("deleted", {}).items()
+                    if v > cutoff}
                 changed = merge_notes(items)
-                if changed:
-                    bump(changed)
+                if changed or removed:
+                    bump(changed + removed)
                 else:
                     save_state()
             return self._json(200, {"ok": True, "rev": _state["rev"],
-                                    "changed": len(changed), "count": len(_state["notes"])})
+                                    "changed": len(changed),
+                                    "deletedApplied": removed,
+                                    "count": len(_state["notes"])})
         if u.path == "/api/note":
             note = data.get("note")
             if not isinstance(note, dict) or not note.get("id"):
@@ -370,6 +403,7 @@ class H(BaseHTTPRequestHandler):
             with LOCK:
                 if u.path == "/api/purge":
                     _state["notes"].pop(nid, None)
+                    _state.setdefault("deleted", {})[nid] = _now()
                 else:
                     note = _state["notes"].get(nid)
                     if not note:

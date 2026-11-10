@@ -1,0 +1,78 @@
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_notes/db.dart';
+import 'package:my_notes/pages/settings_page.dart';
+import 'package:my_notes/sync.dart';
+
+/// 回归测试：回收站里的笔记「彻底删除 / 清空」后不能被同步重新拉回。
+/// 运行时用 MYNOTES_DATA 指向临时目录，绝不会碰到真实笔记库：
+///   MYNOTES_DATA=$(mktemp -d) flutter test test/trash_sync_test.dart
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  test('旧服务端仍持有已删除笔记时，pull 不会把它插回本地', () async {
+    await NotesDb.init();
+    final note = await NotesDb.createNote(null);
+    note.title = '待彻底删除';
+    note.body = '回归测试内容';
+    await NotesDb.updateNote(note);
+    await NotesDb.softDelete(note.id);
+
+    // 模拟旧版 NAS 服务端：/api/sync 不认识 deletedIds，
+    // /api/state 仍会把这条已删除的笔记发给客户端。
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    server.listen((req) async {
+      req.response.headers.contentType = ContentType.json;
+      if (req.uri.path == '/api/state') {
+        req.response.write(jsonEncode({
+          'rev': 7,
+          'epoch': 0,
+          'notes': [
+            {
+              'id': note.id,
+              'title': '待彻底删除',
+              'content': '回归测试内容',
+              'trashed': true,
+              'updatedAt': note.updatedAt,
+            }
+          ],
+        }));
+      } else {
+        // 旧服务端：返回结果里没有 deletedApplied 字段
+        req.response
+            .write(jsonEncode({'ok': true, 'rev': 7, 'changed': 0, 'count': 1}));
+      }
+      await req.response.close();
+    });
+
+    await SettingsStore.write('syncUrl', 'http://127.0.0.1:${server.port}');
+    await SettingsStore.write('syncToken', '');
+
+    await NotesDb.purge(note.id);
+    expect(await NotesDb.getNote(note.id), isNull, reason: '本地应先删掉');
+    expect((await NotesDb.tombstones()).containsKey(note.id), isTrue,
+        reason: 'purge 必须留下墓碑');
+
+    await SyncService.i.pull();
+    expect(await NotesDb.getNote(note.id), isNull,
+        reason: '墓碑必须挡住旧服务端回填，否则用户会看到「删不掉」');
+
+    await server.close(force: true);
+  });
+
+  test('清空回收站会返回全部被删 id 并逐个留下墓碑', () async {
+    final a = await NotesDb.createNote(null);
+    final b = await NotesDb.createNote(null);
+    await NotesDb.softDelete(a.id);
+    await NotesDb.softDelete(b.id);
+
+    final ids = await NotesDb.clearTrash();
+    expect(ids.toSet(), {a.id, b.id});
+    final tombs = await NotesDb.tombstones();
+    expect(tombs.containsKey(a.id), isTrue);
+    expect(tombs.containsKey(b.id), isTrue);
+    expect(await NotesDb.listNotes(null, trash: true), isEmpty);
+  });
+}

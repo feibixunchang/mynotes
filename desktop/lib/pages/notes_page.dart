@@ -56,6 +56,7 @@ class _NotesPageState extends State<NotesPage> {
     AppActions.createNote = _createNote;
     AppActions.focusSearch = () => _searchFocus.requestFocus();
     AppActions.openSettings = _openSettings;
+    SyncService.dataVersion.addListener(_onRemoteData);
     _refreshBooks();
     _refreshTrashCount();
   }
@@ -65,11 +66,20 @@ class _NotesPageState extends State<NotesPage> {
     AppActions.createNote = null;
     AppActions.focusSearch = null;
     AppActions.openSettings = null;
+    SyncService.dataVersion.removeListener(_onRemoteData);
     _searchCtrl.dispose();
     _searchFocus.dispose();
     _searchTimer?.cancel();
     _paneWidths.dispose();
     super.dispose();
+  }
+
+  /// 同步服务拉取/清空远端数据后立即刷新三栏。
+  void _onRemoteData() {
+    if (!mounted) return;
+    _refreshBooks();
+    _refreshTrashCount();
+    _applyView();
   }
 
   Future<void> _refreshTrashCount() async {
@@ -156,6 +166,7 @@ class _NotesPageState extends State<NotesPage> {
 
   Future<void> _purge(String id) async {
     await NotesDb.purge(id);
+    SyncService.i.notifyDeleted([id]);
     SyncService.i.markDirty();
     _refreshTrashCount();
     if (mounted && _selectedNoteId == id) setState(() => _selectedNoteId = null);
@@ -179,7 +190,8 @@ class _NotesPageState extends State<NotesPage> {
       ),
     );
     if (ok == true) {
-      await NotesDb.clearTrash();
+      final ids = await NotesDb.clearTrash();
+      SyncService.i.notifyDeleted(ids);
       SyncService.i.markDirty();
       _refreshTrashCount();
       _applyView();
