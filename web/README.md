@@ -23,8 +23,9 @@ PORT=8000 DATA_DIR=./data python server.py
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/health` | 版本、构建时间、rev、epoch、认证开关 |
-| GET | `/api/state` | 全量笔记状态 |
-| POST | `/api/sync` | 推送/合并笔记 |
+| GET | `/api/state` | 全量笔记状态；v1.3.6 起额外下发 `deletedIds` / `deletedAt` 删除墓碑，客户端据此移除已彻底删除的笔记 |
+| POST | `/api/sync` | 推送/合并笔记；可携带 `deletedIds` / `deletedAt` 批量删除，返回 `deletedApplied` |
+| POST | `/api/purge` | 彻底删除单条笔记并写入删除墓碑 |
 | POST | `/api/clear` | 清空全部笔记并递增 epoch |
 | GET | `/api/events` | SSE 实时推送 |
 | GET | `/api/export.md` | 导出全部 Markdown |
