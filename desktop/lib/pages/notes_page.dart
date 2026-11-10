@@ -406,15 +406,6 @@ class _NotesPageState extends State<NotesPage> {
                             child: Text('我的笔记',
                                 style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold))),
                         IconButton(
-                            icon: _refreshing
-                                ? const SizedBox(
-                                    width: 16,
-                                    height: 16,
-                                    child: CircularProgressIndicator(strokeWidth: 2))
-                                : const Icon(Icons.refresh, size: 18),
-                            tooltip: '刷新（重新同步并重载笔记）',
-                            onPressed: _refreshing ? null : _manualRefresh),
-                        IconButton(
                             icon: const Icon(Icons.file_download_outlined, size: 18),
                             tooltip: '导入笔记（Simplenote / Markdown）',
                             onPressed: _openImportDialog),
@@ -523,6 +514,15 @@ class _NotesPageState extends State<NotesPage> {
                           IconButton(icon: const Icon(Icons.delete_sweep, size: 18), onPressed: _clearTrash)
                         else
                           const SizedBox(width: 36),
+                        IconButton(
+                            icon: _refreshing
+                                ? const SizedBox(
+                                    width: 16,
+                                    height: 16,
+                                    child: CircularProgressIndicator(strokeWidth: 2))
+                                : const Icon(Icons.refresh, size: 18),
+                            tooltip: '刷新（重新同步并重载笔记）',
+                            onPressed: _refreshing ? null : _manualRefresh),
                         IconButton(
                             icon: const Icon(Icons.add, size: 22),
                             tooltip: '新建笔记（Ctrl+Shift+Alt+N）',
