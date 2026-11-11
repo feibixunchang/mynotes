@@ -511,15 +511,31 @@ function load(full) {
     }
   }).catch(e => flash('拉取失败：' + e.message));
 }
+// 服务端把「被彻底删除的 id」直接放进 SSE 广播与 hello 载荷。收到即从内存
+// 移除并重绘，不依赖 rev 增量 / unchanged 反查，删除才真正实时。
+function applyDeletedEvent(e) {
+  let d = null;
+  try { d = JSON.parse(e.data); } catch (_) { return; }
+  const ids = (d && d.deletedIds) || [];
+  if (!ids.length) return;
+  let hit = false;
+  ids.forEach(id => { if (notes.delete(id)) hit = true; });
+  if (selId && ids.indexOf(selId) >= 0) {
+    selId = null; $('#title').value = ''; $('#body').value = '';
+    $('#tagIn').value = ''; $('#bookIn').value = '';
+  }
+  if (hit) { renderNav(); renderList(); }
+}
 function connect() {
   if (es) es.close();
   es = new EventSource('/api/events' + (token ? '?token=' + encodeURIComponent(token) : ''));
   es.onopen = () => { $('#liveDot').classList.remove('off'); $('#liveTxt').textContent = '实时同步已连接'; };
   // 任何变更事件都拉一次，不再用 d.rev !== rev 过滤：rev 恰好相等时
-  // 也可能有另一端刚写入的删除墓碑，unchanged 响应会把它们带回来。
-  es.onmessage = () => { load(false); };
-  // 服务端 hello 是 event: hello + 纯数字 rev：连接/重连时补偿断线期间漏掉的变更。
-  es.addEventListener('hello', () => { load(false); });
+  // 也可能有另一端刚写入的删除墓碑。删除先走上面的即时通道。
+  es.onmessage = e => { applyDeletedEvent(e); load(false); };
+  es.addEventListener('deleted', applyDeletedEvent);
+  // hello 带全部删除墓碑：连接/重连时补偿断线期间漏掉的删除。
+  es.addEventListener('hello', e => { applyDeletedEvent(e); load(false); });
   es.onerror = () => { $('#liveDot').classList.add('off'); $('#liveTxt').textContent = '连接中断，重试中'; };
 }
 function newNote() {

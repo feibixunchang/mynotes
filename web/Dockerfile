@@ -1,7 +1,7 @@
 FROM python:3.13-slim
 
 WORKDIR /app
-# 字体为可选项：若自备 FangZhengSongHei.ttf，把它放到 web/ 并在本行补上该文件名。
+# 网页版使用系统默认字体，不附带任何字体文件。
 COPY server.py index.html favicon.ico ./
 
 ENV DATA_DIR=/data \

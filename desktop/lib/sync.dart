@@ -17,11 +17,17 @@ class SyncService extends ChangeNotifier {
   /// 远端数据变化时递增，主界面据此刷新三栏列表与计数。
   static final ValueNotifier<int> dataVersion = ValueNotifier<int>(0);
 
-  static const String defaultUrl = "http://127.0.0.1:8000";
+  /// 公开分发版不预置任何地址。以前默认 http://127.0.0.1:8000，
+  /// 全新安装的 Windows 安装版会静默连到本机不存在的端口，用户完全看不到
+  /// 任何笔记同步，也不明白为什么。现在改为空并在状态栏明确提示未配置。
+  static const String defaultUrl = "";
+  /// 仅用于设置页的占位示例，采用文档用的私有地址段，不指向任何真实设备。
+  static const String exampleUrl = "http://192.168.1.100:2581";
   static const String defaultToken = "";
 
-  String get baseUrl => SettingsStore.readSync('syncUrl', defaultUrl).trim();
+  String get baseUrl => normalizeUrl(SettingsStore.readSync('syncUrl', defaultUrl));
   String get token => SettingsStore.readSync('syncToken', defaultToken).trim();
+  bool get enabled => SettingsStore.readSync('syncEnabled', '1') != '0';
 
   /// 规范化用户填进来的地址：补 http:// 前缀、去掉结尾多余的斜杠。
   static String normalizeUrl(String raw) {
@@ -108,12 +114,16 @@ class SyncService extends ChangeNotifier {
   }
 
   int _rev = -1;
+  // 每次 stop/reconfigure 递增，让旧的 SSE 重连循环退出，避免双连接。
+  int _generation = 0;
   // epoch 持久化：只有「上次见过的 epoch」与服务端不同，才说明另一端真的清空过，
   // 这样导入大批笔记后重启不会被误清空。
   int _epoch = int.tryParse(SettingsStore.readSync('syncEpoch', '-1')) ?? -1;
   bool _dirty = false;
   bool _pushing = false;
   bool _pulling = false;
+  // SSE 事件撞上正在进行的 pull 时记一笔，pull 结束后补跑，避免整批变更丢失。
+  bool _pullPending = false;
   Timer? _pushTimer;
   Timer? _ssePullTimer;
   Timer? _poll;
@@ -128,6 +138,18 @@ class SyncService extends ChangeNotifier {
 
   void start() {
     _poll?.cancel();
+    if (!enabled) {
+      live = false;
+      resultText = '同步已关闭';
+      notifyListeners();
+      return;
+    }
+    if (baseUrl.isEmpty) {
+      live = false;
+      resultText = '未设置同步地址（设置 → 同步）';
+      notifyListeners();
+      return;
+    }
     // 每 30 秒兜底：脏数据就上推；否则轻量拉取（服务端 unchanged 直接返回空）。
     // 这样启动瞬间的短暂失败会在下一轮自动恢复，状态栏不会长期挂着红色错误。
     _poll = Timer.periodic(const Duration(seconds: 30), (_) async {
@@ -136,10 +158,12 @@ class SyncService extends ChangeNotifier {
       // （含 SSE 断线期间漏掉的）在这里也能被兜住，不必等下一次 rev 变化。
       await pull(silent: true);
     });
+    // SSE 必须立即启动。以前排在 pull()+push() 之后，一次 20 秒的推送超时
+    // 就会让实时通道晚 20 秒才连上。
+    unawaited(_connect());
     Timer(const Duration(seconds: 2), () async {
       await pull(silent: true);
       await push();
-      _connect();
     });
   }
 
@@ -268,7 +292,12 @@ class SyncService extends ChangeNotifier {
   /// 服务端在 unchanged 响应里也会下发删除墓碑，所以必须先应用删除再判断
   /// unchanged，否则「笔记没变、但有笔记在另一端被删掉」会被整个跳过。
   Future<void> pull({bool silent = true, bool full = false}) async {
-    if (_pulling && !full) return;
+    if (_pulling && !full) {
+      // SSE 事件常与 30 秒轮询/启动拉取重叠。以前直接丢掉，导致该次远端
+      // 删除最长要再等 30 秒；这里记下并在当前 pull 结束后补跑一次。
+      _pullPending = true;
+      return;
+    }
     _pulling = true;
     try {
       final path = (!full && _rev >= 0) ? '/api/state?since=$_rev' : '/api/state';
@@ -342,6 +371,56 @@ class SyncService extends ChangeNotifier {
       if (!silent) _fail('拉取异常');
     } finally {
       _pulling = false;
+      if (_pullPending) {
+        _pullPending = false;
+        Future.microtask(() => unawaited(pull()));
+      }
+    }
+  }
+
+  /// 立即落地远端删除：SSE 事件到达的同一帧就删本地记录并刷新三栏。
+  /// 刻意不写本地墓碑 —— 墓碑只由本端主动删除产生，否则会被 push() 再推回
+  /// 服务端，形成「删除广播 → 墓碑 → 再广播」的无限循环。
+  /// 返回实际删掉的条数，便于回归测试断言。
+  Future<int> applyRemoteDeletions(List<String> ids) async {
+    if (ids.isEmpty) return 0;
+    try {
+      final n = await NotesDb.purgeRemoteIds(ids);
+      if (n <= 0) return 0;
+      atMs = DateTime.now().millisecondsSinceEpoch;
+      lastOk = true;
+      resultText = '已同步（移除 $n 条已删除笔记）';
+      SyncService.dataVersion.value++;
+      notifyListeners();
+      return n;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  /// 处理一行 SSE 帧。抽成 public 便于回归测试直接喂服务端帧，
+  /// 也保证「收到删除事件即删」这条路径能被自动化测试覆盖。
+  Future<void> handleSseDataLine(String line) async {
+    if (!line.startsWith('data: ')) return;
+    final payload = line.substring(6).trim();
+    if (payload.isEmpty) return;
+    // 新版服务端把「被彻底删除的 id」直接放进广播载荷：收到即删，
+    // 不再依赖 rev 增量 / unchanged 反查，删除才真正是实时的。
+    // hello 事件也带全部墓碑，重连时能补偿断线期间的删除。
+    if (payload.startsWith('{')) {
+      try {
+        final d = jsonDecode(payload);
+        if (d is Map) {
+          final ids = ((d['deletedIds'] as List?) ?? const [])
+              .whereType<String>()
+              .toList();
+          if (ids.isNotEmpty) await applyRemoteDeletions(ids);
+        }
+      } catch (_) {}
+    }
+    // 内容变更与 rev 对齐仍走合并拉取；旧版 hello 的纯数字 rev 也兼容。
+    if (payload.startsWith('{') || RegExp(r'^\d+$').hasMatch(payload)) {
+      _schedulePull();
     }
   }
 
@@ -356,13 +435,20 @@ class SyncService extends ChangeNotifier {
   // ---------- SSE 实时监听 ----------
 
   Future<void> _connect() async {
+    if (baseUrl.isEmpty) return;
+    final gen = _generation;
     for (;;) {
+      if (gen != _generation) return;
       try {
         final client = HttpClient()
           ..connectionTimeout = const Duration(seconds: 8)
           ..idleTimeout = const Duration(seconds: 60);
         _sseClient = client;
         final req = await client.getUrl(Uri.parse('$baseUrl/api/events?token=${Uri.encodeComponent(token)}'));
+        req.headers.set('Authorization', 'Bearer ${token.trim()}');
+        req.headers.set('Accept', 'text/event-stream');
+        req.headers.set('Connection', 'keep-alive');
+        req.headers.set('Cache-Control', 'no-cache');
         final resp = await req.close();
         if (resp.statusCode != 200) {
           client.close(force: true);
@@ -378,17 +464,16 @@ class SyncService extends ChangeNotifier {
           atMs = DateTime.now().millisecondsSinceEpoch;
         }
         notifyListeners();
-        final lines = resp.transform(utf8.decoder).transform(const LineSplitter());
+        // 45 秒没有任何数据行就判定连接僵死（服务端 20 秒一次心跳注释行），
+        // 主动断开重连，避免「状态栏显示实时同步、实际收不到事件」。
+        final lines = resp
+            .transform(utf8.decoder)
+            .transform(const LineSplitter())
+            .timeout(const Duration(seconds: 45),
+                onTimeout: (sink) => sink.addError(TimeoutException(
+                    'SSE 心跳超时', const Duration(seconds: 45))));
         await for (final line in lines) {
-          if (line.startsWith('data: ')) {
-            final payload = line.substring(6).trim();
-            // 服务端 hello 是纯数字 rev（event: hello），变更事件是 JSON。
-            // 两者都触发一次拉取：断线重连靠 hello 补偿期间漏掉的变更；
-            // 变更事件也不再用 r != _rev 过滤，避免 rev 恰好相等时漏掉删除。
-            if (payload.startsWith('{') || RegExp(r'^\d+$').hasMatch(payload)) {
-              _schedulePull();
-            }
-          }
+          await handleSseDataLine(line);
         }
         client.close(force: true);
       } catch (_) {
@@ -397,11 +482,12 @@ class SyncService extends ChangeNotifier {
       live = false;
       notifyListeners();
       await Future.delayed(const Duration(seconds: 8));
-      if (_sseClient == null) return;
+      if (gen != _generation || _sseClient == null) return;
     }
   }
 
   void stop() {
+    _generation++;
     _pushTimer?.cancel();
     _ssePullTimer?.cancel();
     _ssePullTimer = null;
@@ -422,6 +508,7 @@ class SyncService extends ChangeNotifier {
   }
 
   Future<Map<String, dynamic>?> _send(String method, String path, String? body) async {
+    if (baseUrl.isEmpty) return null;
     try {
       final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
       final req = await client.openUrl(method, Uri.parse('$baseUrl$path'));

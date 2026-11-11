@@ -176,4 +176,94 @@ void main() {
         reason: '笔记没变化但另一端删过笔记时，本地也必须同步删除');
     await server.close(force: true);
   });
+
+  test('SSE 删除事件到达的同一帧就删本地笔记，且不写墓碑', () async {
+    final note = await NotesDb.createNote(null);
+    note.title = '另一端刚删除';
+    await NotesDb.updateNote(note);
+
+    final before = SyncService.dataVersion.value;
+    final frame = jsonEncode({
+      'rev': 101,
+      'changed': [note.id],
+      'deletedIds': [note.id],
+    });
+    // 直接喂服务端 SSE 帧，不依赖 rev 增量 / unchanged 反查。
+    await SyncService.i.handleSseDataLine('data: $frame');
+    SyncService.i.stop(); // 取消帧处理里排的 150ms 合并拉取
+
+    expect(await NotesDb.getNote(note.id), isNull,
+        reason: '删除事件必须立即生效，不能等 30 秒轮询');
+    expect(SyncService.dataVersion.value, greaterThan(before),
+        reason: '删掉记录后必须通知界面重绘三栏');
+    expect((await NotesDb.tombstones()).containsKey(note.id), isFalse,
+        reason: '远端删除不能写本地墓碑，否则 push 会把删除再广播回去形成循环');
+  });
+
+  test('重连 hello 帧带多条墓碑时一次性补齐，且不误删其它笔记', () async {
+    final a = await NotesDb.createNote(null);
+    final b = await NotesDb.createNote(null);
+    final keep = await NotesDb.createNote(null);
+    final hello = jsonEncode({
+      'rev': 102,
+      'changed': <dynamic>[],
+      'deletedIds': [a.id, b.id],
+    });
+    await SyncService.i.handleSseDataLine('data: $hello');
+    SyncService.i.stop();
+
+    expect(await NotesDb.getNote(a.id), isNull);
+    expect(await NotesDb.getNote(b.id), isNull);
+    expect(await NotesDb.getNote(keep.id), isNotNull,
+        reason: '只能删帧里列出的 id');
+  });
+
+  test('普通内容变更帧 / 旧版纯数字 hello 不会误删笔记', () async {
+    final note = await NotesDb.createNote(null);
+    await SyncService.i.handleSseDataLine(
+        'data: ${jsonEncode({'rev': 103, 'changed': [note.id], 'deletedIds': <dynamic>[]})}');
+    await SyncService.i.handleSseDataLine('data: 103');
+    SyncService.i.stop();
+    expect(await NotesDb.getNote(note.id), isNotNull);
+  });
+
+  test('未配置同步地址时不连任何服务，状态栏明确提示', () async {
+    await SettingsStore.write('syncUrl', '');
+    expect(SyncService.i.baseUrl, isEmpty,
+        reason: '全新安装版不能有隐式默认地址，否则会静默连到本机不存在的端口');
+    SyncService.i.start();
+    expect(SyncService.i.resultText, contains('未设置同步地址'));
+    expect(SyncService.i.live, isFalse);
+    SyncService.i.stop();
+  });
+
+  test('SSE 拉取与轮询撞车时不丢事件，会自动补跑一次', () async {
+    var hits = 0;
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    server.listen((req) async {
+      hits++;
+      // 故意慢一点，制造「第一个 pull 还在进行、第二个 pull 到达」的窗口
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      req.response.headers.contentType = ContentType.json;
+      req.response.write(jsonEncode({
+        'rev': 200,
+        'epoch': 0,
+        'notes': <dynamic>[],
+        'deletedIds': <dynamic>[],
+      }));
+      await req.response.close();
+    });
+    await SettingsStore.write('syncUrl', 'http://127.0.0.1:${server.port}');
+    await SettingsStore.write('syncToken', '');
+
+    final first = SyncService.i.pull();
+    final second = SyncService.i.pull(); // 撞上 _pulling，应记 pending
+    await first;
+    await second;
+    // 补跑经 Future.microtask 调度，等它真正发出请求
+    await Future<void>.delayed(const Duration(milliseconds: 600));
+    expect(hits, greaterThanOrEqualTo(2),
+        reason: '第二个 pull 不能被静默丢弃，否则远端变更最长要等 30 秒');
+    await server.close(force: true);
+  });
 }

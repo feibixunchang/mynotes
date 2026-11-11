@@ -200,15 +200,47 @@ class _NotesPageState extends State<NotesPage> {
   }
 
   void _selectNote(Note n) {
-    if (n.trashed) {
-      setState(() => _selectedNoteId = null);
-      _restore(n.id);
-      return;
-    }
+    // 回收站里点条目只做预览、绝不改变状态。以前会直接 restore，笔记立刻
+    // 从列表消失，看起来就像「点一下被删了」。状态变更一律走显式按钮 + 确认。
     setState(() => _selectedNoteId = n.id);
   }
 
+  /// 回收站内所有会改变笔记状态的操作统一走二次确认。
+  Future<bool> _confirmTrashAction(String title, String message, String okLabel,
+      {bool danger = false}) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (b) => AlertDialog(
+        title: Text(title),
+        content: Text(message),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.of(b).pop(false),
+              child: const Text('取消')),
+          TextButton(
+              onPressed: () => Navigator.of(b).pop(true),
+              style: danger
+                  ? TextButton.styleFrom(foregroundColor: Colors.red)
+                  : null,
+              child: Text(okLabel)),
+        ],
+      ),
+    );
+    return ok == true;
+  }
+
+  Future<String> _noteLabel(String id) async {
+    final n = await NotesDb.getNote(id);
+    final t = n?.title.trim() ?? '';
+    return t.isEmpty ? '这篇笔记' : '「$t」';
+  }
+
   Future<void> _restore(String id) async {
+    final label = await _noteLabel(id);
+    if (!await _confirmTrashAction(
+        '还原笔记', '$label 将从回收站恢复，可以重新编辑。', '还原')) {
+      return;
+    }
     await NotesDb.restore(id);
     SyncService.i.markDirty();
     _applyView();
@@ -218,6 +250,14 @@ class _NotesPageState extends State<NotesPage> {
   }
 
   Future<void> _purge(String id) async {
+    final label = await _noteLabel(id);
+    final ok = await _confirmTrashAction(
+      '彻底删除',
+      '$label 将被永久删除，无法恢复；其它设备与 NAS 上的同一条笔记也会同步删除。',
+      '永久删除',
+      danger: true,
+    );
+    if (!ok) return;
     await NotesDb.purge(id);
     SyncService.i.notifyDeleted([id]);
     SyncService.i.markDirty();
@@ -228,27 +268,18 @@ class _NotesPageState extends State<NotesPage> {
 
   Future<void> _clearTrash() async {
     final count = _notes.length;
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (b) => AlertDialog(
-        title: const Text('清空回收站'),
-        content: Text('将永久删除回收站中的 $count 条笔记，此操作不可恢复。'),
-        actions: [
-          TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('取消')),
-          TextButton(
-              onPressed: () => Navigator.of(context).pop(true),
-              style: TextButton.styleFrom(foregroundColor: Colors.red),
-              child: const Text('清空')),
-        ],
-      ),
+    final ok = await _confirmTrashAction(
+      '清空回收站',
+      '将永久删除回收站中的 $count 条笔记，无法恢复；其它设备与 NAS 上的这些笔记也会同步删除。',
+      '清空',
+      danger: true,
     );
-    if (ok == true) {
-      final ids = await NotesDb.clearTrash();
-      SyncService.i.notifyDeleted(ids);
-      SyncService.i.markDirty();
-      _refreshTrashCount();
-      _applyView();
-    }
+    if (!ok) return;
+    final ids = await NotesDb.clearTrash();
+    SyncService.i.notifyDeleted(ids);
+    SyncService.i.markDirty();
+    _refreshTrashCount();
+    _applyView();
   }
 
   Future<void> _newBook() async {
@@ -731,6 +762,19 @@ class _NotesPageState extends State<NotesPage> {
                 style: TextStyle(
                     fontSize: kFontTiny,
                     color: SyncService.i.lastOk ? kSubTextColor : Colors.red)),
+            if (SyncService.i.baseUrl.isEmpty)
+              Padding(
+                padding: const EdgeInsets.only(left: 10),
+                child: InkWell(
+                  onTap: () => _openSettings(),
+                  child: const Text('未设置同步地址 · 点此设置',
+                      style: TextStyle(
+                          fontSize: kFontTiny,
+                          color: Colors.red,
+                          fontWeight: FontWeight.w600,
+                          decoration: TextDecoration.underline)),
+                ),
+              ),
             const Spacer(),
             Text(kVersionLabel,
                 style: const TextStyle(
@@ -738,7 +782,7 @@ class _NotesPageState extends State<NotesPage> {
                     fontWeight: FontWeight.w600,
                     color: Color(0xFFB45309))),
             const SizedBox(width: 12),
-            Text(SyncService.i.baseUrl,
+            Text(SyncService.i.baseUrl.isEmpty ? '（未连接 NAS）' : SyncService.i.baseUrl,
                 style: const TextStyle(fontSize: kFontTiny, color: kHintColor)),
             const SizedBox(width: 12),
             Text(NotesDb.dataDir,
@@ -950,6 +994,28 @@ class _NotesPageState extends State<NotesPage> {
                 Text(formatTimeShort(n.updatedAt),
                     style: const TextStyle(
                         fontSize: kFontTiny, color: kSubTextColor)),
+                // 回收站操作按钮放在标题行常显：以前藏在「有摘要才显示」的
+                // 第二行里，空笔记完全没有按钮，13px 图标还极易误触。
+                if (n.trashed) ...[
+                  const SizedBox(width: 2),
+                  IconButton(
+                      icon: const Icon(Icons.restore_from_trash, size: 16),
+                      tooltip: '还原笔记（需确认）',
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.all(2),
+                      constraints: const BoxConstraints(
+                          minWidth: 28, minHeight: 28),
+                      onPressed: () => _restore(n.id)),
+                  IconButton(
+                      icon: const Icon(Icons.delete_forever, size: 16,
+                          color: Color(0xFFCC3333)),
+                      tooltip: '彻底删除（需确认）',
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.all(2),
+                      constraints: const BoxConstraints(
+                          minWidth: 28, minHeight: 28),
+                      onPressed: () => _purge(n.id)),
+                ],
               ],
             ),
             // 第二行：一行摘要 + 标签
@@ -972,23 +1038,6 @@ class _NotesPageState extends State<NotesPage> {
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
                               fontSize: kFontTiny, color: Color(0xFF4A5EE5))),
-                    ],
-                    if (n.trashed) ...[
-                      const SizedBox(width: 4),
-                      IconButton(
-                          icon: const Icon(Icons.restore, size: 13),
-                          visualDensity: VisualDensity.compact,
-                          padding: EdgeInsets.zero,
-                          constraints: const BoxConstraints(
-                              minWidth: 24, minHeight: 24),
-                          onPressed: () => _restore(n.id)),
-                      IconButton(
-                          icon: const Icon(Icons.delete_forever, size: 13),
-                          visualDensity: VisualDensity.compact,
-                          padding: EdgeInsets.zero,
-                          constraints: const BoxConstraints(
-                              minWidth: 24, minHeight: 24),
-                          onPressed: () => _purge(n.id)),
                     ],
                   ],
                 ),

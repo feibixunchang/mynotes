@@ -35,8 +35,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
 TOKEN = os.environ.get("SYNC_TOKEN", "")
 PORT = int(os.environ.get("PORT", "8000"))
-APP_VERSION = "1.3.7"
-BUILD_STAMP = "2026-11-10 22:30"
+APP_VERSION = "1.3.8"
+BUILD_STAMP = "2026-11-11 09:45"
 STATE = os.path.join(DATA_DIR, "state.json")
 LEGACY = os.path.join(DATA_DIR, "snapshot.json")
 MD_DIR = os.path.join(DATA_DIR, "md")
@@ -129,11 +129,17 @@ def write_md_mirror():
             f.write(n.get("content") or n.get("title") or "")
 
 
-def bump(changed):
+def bump(changed, deleted=None):
+    """推进 rev 并广播。
+
+    deleted 是本次被彻底删除的 id 列表：单独放进广播载荷，客户端收到即可
+    直接删本地记录，不必再反查 /api/state（反查会受 rev/unchanged 短路影响）。
+    """
     _state["rev"] = int(_state.get("rev", 0)) + 1
     _state["updatedAt"] = _now()
     save_state()
-    msg = json.dumps({"rev": _state["rev"], "changed": changed})
+    msg = json.dumps({"rev": _state["rev"], "changed": changed,
+                      "deletedIds": deleted or []})
     for q in list(SUBS):
         try:
             q.put_nowait(msg)
@@ -301,13 +307,22 @@ class H(BaseHTTPRequestHandler):
             with LOCK:
                 SUBS.append(q)
                 rev = _state["rev"]
+                cutoff = _now() - 365 * 24 * 3600 * 1000
+                tombs = [k for k, v in _state.get("deleted", {}).items()
+                         if v > cutoff]
+                # hello 也带上全部删除墓碑：断线重连的客户端可立即补偿期间
+                # 漏掉的删除，不必等下一次 rev 变化或 30 秒轮询。
+                hello = json.dumps({"rev": rev, "deletedIds": tombs,
+                                    "changed": []})
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
             self.send_header("Connection", "keep-alive")
+            # 反代（nginx 等）默认会缓冲 SSE，导致事件不实时下发。
+            self.send_header("X-Accel-Buffering", "no")
             self.end_headers()
             try:
-                self.wfile.write(("event: hello\ndata: %d\n\n" % rev).encode())
+                self.wfile.write(("event: hello\ndata: %s\n\n" % hello).encode())
                 self.wfile.flush()
                 while True:
                     try:
@@ -354,11 +369,12 @@ class H(BaseHTTPRequestHandler):
             # 一键删除所有笔记：清空服务端并递增 epoch，桌面端 pull 时据此同步清空本地
             with LOCK:
                 now = _now()
-                for nid in list(_state["notes"].keys()):
+                ids = list(_state["notes"].keys())
+                for nid in ids:
                     _state.setdefault("deleted", {})[nid] = now
                 _state["notes"] = {}
                 _state["epoch"] = int(_state.get("epoch", 0)) + 1
-                bump([])
+                bump([], ids)
             return self._json(200, {"ok": True, "rev": _state["rev"],
                                     "epoch": _state["epoch"]})
 
@@ -387,7 +403,7 @@ class H(BaseHTTPRequestHandler):
                     if v > cutoff}
                 changed = merge_notes(items)
                 if changed or removed:
-                    bump(changed + removed)
+                    bump(changed + removed, removed)
                 else:
                     save_state()
             return self._json(200, {"ok": True, "rev": _state["rev"],
@@ -418,7 +434,8 @@ class H(BaseHTTPRequestHandler):
                     note["trashed"] = (u.path == "/api/delete")
                     note["updatedAt"] = _now()
                     _state["notes"][nid] = note
-                bump([nid])
+                # 只有 /api/purge 是彻底删除；/api/delete 只是移入回收站。
+                bump([nid], [nid] if u.path == "/api/purge" else [])
             return self._json(200, {"ok": True, "rev": _state["rev"]})
         return self._json(404, {"ok": False, "error": "not found"})
 

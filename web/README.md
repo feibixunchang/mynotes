@@ -25,17 +25,26 @@ PORT=8000 DATA_DIR=./data python server.py
 | GET | `/health` | 版本、构建时间、rev、epoch、认证开关 |
 | GET | `/api/state` | 全量笔记状态；`deletedIds` / `deletedAt` 下发删除墓碑，客户端据此移除已彻底删除的笔记。带 `since=<rev>` 且 `since == 当前rev` 时返回 `unchanged: true`（`notes` 为空），**v1.3.7 起该响应同样携带 `deletedIds` / `deletedAt` / `epoch`**，避免另一端删除要等下一次笔记变更才同步 |
 | POST | `/api/sync` | 推送/合并笔记；可携带 `deletedIds` / `deletedAt` 批量删除，返回 `deletedApplied` |
-| POST | `/api/purge` | 彻底删除单条笔记并写入删除墓碑 |
-| POST | `/api/clear` | 清空全部笔记并递增 epoch |
-| GET | `/api/events` | SSE 实时推送 |
+| POST | `/api/purge` | 彻底删除单条笔记、写入删除墓碑并广播删除事件 |
+| POST | `/api/clear` | 清空全部笔记、递增 epoch 并广播全部被删 id |
+| GET | `/api/events` | SSE 实时推送。**v1.3.8 起广播与 `hello` 帧都携带 `deletedIds`**：客户端收到即删本地记录，不必反查 `/api/state`；`hello` 带全部当前墓碑用于重连补偿。响应带 `X-Accel-Buffering: no`，反代不会缓冲事件 |
 | GET | `/api/export.md` | 导出全部 Markdown |
 | POST | `/api/attachment` | 上传附件 |
-| GET | `/font.ttf` | 可选自定义字体；未放置时返回 404，前端回退系统字体 |
 
-## 字体（可选）
+## 字体
 
-自备授权字体时，把 `FangZhengSongHei.ttf` 放到本目录，并在 `Dockerfile` 的 `COPY` 行补上文件名，
-然后 `docker compose up -d --build`。未放置时页面使用系统字体。
+v1.3.7 起网页版不再加载任何自定义字体，统一使用 `system-ui` 系统默认字体栈，
+按钮与输入框一律继承。`index.html` 中不存在 `@font-face`，无需附带字体文件。
+
+## 实时同步回归测试
+
+```bash
+python3 web/test_realtime_sync.py
+```
+
+脚本会起一个隔离的真实 `server.py`（独立临时数据目录 + 随机本地端口），
+模拟三个 SSE 订阅者并验证删除广播、purge 广播、移入回收站不误报、
+`unchanged` 兜底，且不触碰任何真实笔记数据。
 
 ## 安全提示
 

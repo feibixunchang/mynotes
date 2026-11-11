@@ -11,7 +11,7 @@
 #define MyAppExeName "my_notes.exe"
 
 #ifndef MyAppVersion
-  #define MyAppVersion "1.3.7"
+  #define MyAppVersion "1.3.8"
 #endif
 #ifndef MyStage
   #define MyStage "."
