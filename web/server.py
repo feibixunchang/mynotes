@@ -25,6 +25,7 @@ import os
 import re
 import json
 import time
+import hashlib
 import mimetypes
 import threading
 import tempfile
@@ -35,8 +36,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
 TOKEN = os.environ.get("SYNC_TOKEN", "")
 PORT = int(os.environ.get("PORT", "8000"))
-APP_VERSION = "1.3.9"
-BUILD_STAMP = "2026-11-11 13:05"
+APP_VERSION = "1.3.10"
+BUILD_STAMP = "2026-11-11 14:10"
 STATE = os.path.join(DATA_DIR, "state.json")
 LEGACY = os.path.join(DATA_DIR, "snapshot.json")
 MD_DIR = os.path.join(DATA_DIR, "md")
@@ -122,28 +123,117 @@ def load_state():
 
 
 def save_state():
+    """持久化 state.json，并把 markdown 镜像丢给后台线程去做。
+
+    markdown 镜像必须异步：它在 NAS 上要写几百个文件，
+    实测 260 条笔记时一次重建要 1.7 秒。以前这里是同步的，
+    等于每次笔记变更都要先把这 1.7 秒等完再广播 ——
+    三端同步的延迟因此高达 0.4~2 秒，「实时」名存实亡。
+    """
     atomic_write(STATE, _state)
-    try:
-        write_md_mirror()
-    except Exception:
-        pass
+    schedule_md_mirror()
+
+
+# markdown 镜像的后台调度：合并短时间内的多次变更，只重建一次。
+_md_pending = False
+_md_lock = threading.Lock()
+_md_started = False
+# markdown 镜像的内容指纹缓存：文件名 -> 内容 md5。
+# 用它判断「这个文件要不要重写」，避免每次都去读文件比对
+# （NAS 上读 260 个文件也不便宜）。
+_md_fingerprints = {}
+
+
+def schedule_md_mirror():
+    """请求后台线程重建 markdown 镜像（幂等，多次调用只排一次任务）。"""
+    global _md_pending
+    with _md_lock:
+        _md_pending = True
+
+
+def _md_mirror_worker():
+    """后台线程：等一小会儿没有新变更后，重建 markdown 镜像。
+
+    注意：这里必须显式声明 global _md_pending。
+    函数体内对 _md_pending 有赋值，Python 会把它当成本地变量，
+    于是 `if not _md_pending` 读到的是未赋值的局部名 →
+    UnboundLocalError → 后台线程直接死掉 → 镜像永远不再重建。
+    """
+    global _md_pending
+    while True:
+        try:
+            time.sleep(1.0)
+            with _md_lock:
+                if not _md_pending:
+                    continue
+                _md_pending = False
+            try:
+                write_md_mirror()
+            except Exception:
+                pass
+        except Exception:
+            # 后台线程绝不能因为任何异常而死掉：
+            # 一旦死了，markdown 镜像就永远停在旧状态。
+            time.sleep(1.0)
+
+
+def start_md_worker():
+    global _md_started
+    if _md_started:
+        return
+    _md_started = True
+    t = threading.Thread(target=_md_mirror_worker, daemon=True)
+    t.start()
+    # 启动时主动排一次全量重建：
+    # 服务重启后 _md_pending 初始为 False，如果没人再改笔记，
+    # 镜像就永远不会生成（曾经就出现过 md 目录空掉的情况）。
+    schedule_md_mirror()
 
 
 def write_md_mirror():
+    """把笔记内容镜像成 .md 文件（增量：只写变化过的文件）。
+
+    以前是「删掉全部再重写全部」：260 条笔记 = 260 次删除 + 260 次写入，
+    在 NAS 上实测 1.7 秒，而它又卡在广播之前，等于拖慢每一次同步。
+    现在用内存指纹缓存做增量：
+      - 指纹没变 → 一个字节都不写；
+      - 指纹变了 → 只重写这一个文件；
+      - 目录里多出来的旧文件（笔记已删/改名）才清理。
+    第一次运行缓存为空，会整体写一遍（后台线程里做，不影响同步）。
+    镜像文件只是给人看的副产物，state.json 才是权威数据。
+    """
+    global _md_fingerprints
     os.makedirs(MD_DIR, exist_ok=True)
-    for fn in os.listdir(MD_DIR):
-        if fn.endswith(".md"):
-            try:
-                os.remove(os.path.join(MD_DIR, fn))
-            except Exception:
-                pass
+    live = set()
+    fingerprints = {}
     for i, n in enumerate(_state["notes"].values()):
         t = (n.get("title") or "").strip().replace("\n", " ")[:40]
         for ch in '\\/:*?"<>|\r\n\t':
             t = t.replace(ch, "_")
         name = (t or "untitled") + "_" + str(i) + ".md"
-        with open(os.path.join(MD_DIR, name), "w", encoding="utf-8") as f:
-            f.write(n.get("content") or n.get("title") or "")
+        live.add(name)
+        body = n.get("content") or n.get("title") or ""
+        fp = hashlib.md5(body.encode("utf-8")).hexdigest()
+        fingerprints[name] = fp
+        if _md_fingerprints.get(name) == fp and os.path.exists(
+                os.path.join(MD_DIR, name)):
+            continue  # 内容没变，跳过写入
+        try:
+            with open(os.path.join(MD_DIR, name), "w", encoding="utf-8") as f:
+                f.write(body)
+        except Exception:
+            pass
+    # 清理不再对应任何笔记的旧文件
+    try:
+        for fn in os.listdir(MD_DIR):
+            if fn.endswith(".md") and fn not in live:
+                try:
+                    os.remove(os.path.join(MD_DIR, fn))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    _md_fingerprints = fingerprints
 
 
 def bump(changed, deleted=None):
@@ -156,7 +246,6 @@ def bump(changed, deleted=None):
     """
     _state["rev"] = int(_state.get("rev", 0)) + 1
     _state["updatedAt"] = _now()
-    save_state()
     ids = list(dict.fromkeys(str(x) for x in (changed or [])))
     partial = len(ids) > MAX_EVENT_NOTES
     notes = [] if partial else [_state["notes"][i] for i in ids
@@ -169,11 +258,15 @@ def bump(changed, deleted=None):
         "deletedIds": [str(x) for x in (deleted or [])],
         "partial": partial,
     }, ensure_ascii=False)
+    # 先广播、再落盘：客户端等的是广播，不是磁盘。
+    # 反过来的话，每次变更都要先等 state.json 写完（NAS 上还要更久），
+    # 三端就会明显感觉到「延迟半秒才同步」。
     for q in list(SUBS):
         try:
             q.put_nowait(msg)
         except Exception:
             pass
+    save_state()
 
 
 def merge_notes(items):
@@ -527,6 +620,7 @@ def main():
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(ATTACH_DIR, exist_ok=True)
     load_state()
+    start_md_worker()
     print("我的笔记 NAS 网页版 v3 on %d, %d notes, rev=%d, auth=%s"
           % (PORT, len(_state["notes"]), _state["rev"], "on" if TOKEN else "off"),
           flush=True)

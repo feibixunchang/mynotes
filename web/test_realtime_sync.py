@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""v1.3.9 端到端回归：服务端权威时间戳 / 回收站实时 / 三端排序一致。
+"""v1.3.10 端到端回归：服务端权威时间戳 / 回收站实时 / 三端排序一致。
 
 起一个**隔离**的真实 server.py（独立 DATA_DIR / 随机端口），模拟三端订阅，
 验证本次修复的三个根因在服务端层面彻底修好：
@@ -135,7 +135,7 @@ def main():
         check("隔离服务端启动", health is not None)
         if health is None:
             return 1
-        check("服务端版本为 1.3.9", health.get("version") == "1.3.9",
+        check("服务端版本为 1.3.10", health.get("version") == "1.3.10",
               "version=%s build=%s" % (health.get("version"), health.get("build")))
 
         a = SseClient(port, "Windows")
