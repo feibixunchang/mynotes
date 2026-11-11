@@ -28,17 +28,27 @@ const String _ua = 'MyNotes-Updater/$kAppVersion';
 /// 用于 api.github.com 完全不可达时的兜底。
 const List<String> _metaUrls = <String>[
   'https://api.github.com/repos/$_repo/releases/latest',
-  'https://ghfast.top/https://api.github.com/repos/$_repo/releases/latest',
+  // gh-proxy.com 实测能正常代理 GitHub API（0.9s 返回），
+  // 而原来的 ghfast.top 已完全失效（连接超时 12s），
+  // 放在这里会白白拖慢整个元数据窗口。
+  'https://gh-proxy.com/https://api.github.com/repos/$_repo/releases/latest',
   'https://cdn.jsdelivr.net/gh/$_repo@main/update/latest.json',
+  // raw 直读仓库清单：jsdelivr 有 TTL 缓存，清完 CDN 也不会立刻生效，
+  // 这条是最终的兜底。
+  'https://raw.githubusercontent.com/$_repo/main/update/latest.json',
 ];
 
 /// 下载渠道：空前缀是官方直连，其余为公开加速镜像。
 /// 镜像只负责传输，内容以 SHA-256 校验为准。
 const List<String> _mirrorPrefixes = <String>[
   '',
-  'https://ghfast.top/',
-  'https://ghproxy.net/',
+  // 实测速度（2026-11-11，下载 3MB 片段）：
+  //   gh-proxy.com  367 KB/s  ← 最快
+  //   ghproxy.net   123 KB/s
+  //   直连 GitHub    83 KB/s
+  // ghfast.top 已失效（连接超时），不再列入，避免浪费一个 worker。
   'https://gh-proxy.com/',
+  'https://ghproxy.net/',
 ];
 
 enum UpdateStatus {
