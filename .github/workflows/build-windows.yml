@@ -42,12 +42,12 @@ jobs:
         working-directory: desktop
         run: flutter pub get
 
-      - name: Regression test (trash sync)
+      - name: Regression test (trash sync + realtime snapshot + dirty sync)
         working-directory: desktop
         continue-on-error: true
         env:
           MYNOTES_DATA: ${{ runner.temp }}\mynotes-test-data
-        run: flutter test test/trash_sync_test.dart
+        run: flutter test
 
       - name: Build Windows release
         working-directory: desktop

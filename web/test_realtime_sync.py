@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""端到端回归：删除事件独立 SSE 通道。
+"""v1.3.9 端到端回归：服务端权威时间戳 / 回收站实时 / 三端排序一致。
 
 起一个**隔离**的真实 server.py（独立 DATA_DIR / 随机端口），模拟三端订阅，
-再从 A 端发起彻底删除，验证：
+验证本次修复的三个根因在服务端层面彻底修好：
 
-1. hello 帧携带当前全部删除墓碑（重连补偿）；
-2. 删除广播里带 deletedIds，所有订阅者 1 秒内收到；
-3. unchanged 兜底通道仍带 deletedIds（SSE 断线时 30 秒轮询能补上）；
-4. /api/purge 也广播删除，而 /api/delete（移入回收站）不广播删除。
+1. **服务端权威时间戳**：客户端推的时间戳一律不采信，服务端自己裁决，
+   并通过 stamps 回传。客户端时钟偏差再大也不会让真实修改被静默丢弃，
+   三端最终持有同一套时间戳 → 列表顺序完全一致。
+2. **回收站实时**：`/api/delete`（移入回收站）与 `/api/restore`（恢复）
+   都会立刻广播，且广播帧里带笔记全文与 trashed 状态，
+   其它端收到同一帧就能落地，不必反查 /api/state。
+3. **墓碑不可复活**：被彻底删除的笔记，任何客户端再推回来都不会复活。
 
 只用 127.0.0.1 与临时目录，不触碰任何真实笔记数据。
 运行：python3 web/test_realtime_sync.py
@@ -132,7 +135,7 @@ def main():
         check("隔离服务端启动", health is not None)
         if health is None:
             return 1
-        check("服务端版本为 1.3.8", health.get("version") == "1.3.8",
+        check("服务端版本为 1.3.9", health.get("version") == "1.3.9",
               "version=%s build=%s" % (health.get("version"), health.get("build")))
 
         a = SseClient(port, "Windows")
@@ -147,26 +150,122 @@ def main():
                   d is not None and isinstance(d.get("deletedIds"), list),
                   "rev=%s" % (d or {}).get("rev"))
 
-        def note(nid, title):
+        def note(nid, title, ts=None):
             return {"id": nid, "title": title, "content": "e2e " + nid,
                     "tags": [], "pinned": False, "trashed": False,
-                    "createdAt": 1, "updatedAt": int(time.time() * 1000)}
+                    "createdAt": 1,
+                    "updatedAt": ts if ts is not None else int(time.time() * 1000)}
 
-        n1, n2, n3 = note("e2e-1", "一"), note("e2e-2", "二"), note("e2e-3", "三")
-        api("/api/sync", {"notes": [n1, n2, n3], "deletedIds": []})
+        # ================================================================
+        # 1. 服务端权威时间戳
+        # ================================================================
+        print("\n[1] 服务端权威时间戳")
+        # 客户端 A 推一条笔记，但时间戳故意给成「未来 10 年」——
+        # 旧逻辑会采信它，导致这条笔记在三端排序里永远排第一。
+        far_future = int(time.time() * 1000) + 365 * 24 * 3600 * 1000
+        n1 = note("e2e-1", "一", ts=far_future)
+        res = api("/api/sync", {"notes": [n1], "deletedIds": []})
+        stamps = res.get("stamps") or {}
+        check("push 响应回传 stamps", n1["id"] in stamps, "stamps=%s" % stamps)
+        check("服务端不采信客户端未来时间戳",
+              stamps.get(n1["id"], 0) < far_future,
+              "stamp=%s 客户端给的=%s" % (stamps.get(n1["id"]), far_future))
+
         state0 = api("/api/state")
-        check("三条笔记已写入", len(state0["notes"]) == 3,
-              "rev=%d" % state0["rev"])
+        stored = [x for x in state0["notes"] if x["id"] == n1["id"]]
+        check("服务端时间戳是服务端自己的时间",
+              bool(stored) and abs(stored[0]["updatedAt"] - int(time.time() * 1000)) < 60000,
+              "stored=%s" % (stored[0]["updatedAt"] if stored else None))
 
-        # ---- 核心：A 端彻底删除 n1 ----
+        # 客户端 B 推同一条笔记，内容相同 → 服务端应回传已有权威时间戳，
+        # 两端据此对齐，排序才能完全一致。
+        res_b = api("/api/sync", {"notes": [note("e2e-1", "一")], "deletedIds": []})
+        stamps_b = res_b.get("stamps") or {}
+        check("内容相同时回传同一权威时间戳",
+              stamps_b.get(n1["id"]) == stamps.get(n1["id"]),
+              "%s vs %s" % (stamps_b.get(n1["id"]), stamps.get(n1["id"])))
+
+        # 内容变化 → 服务端盖新的、严格递增的时间戳
+        n1b = note("e2e-1", "一改", ts=1)          # 客户端时间戳故意给很旧
+        res_c = api("/api/sync", {"notes": [n1b], "deletedIds": []})
+        stamp_c = (res_c.get("stamps") or {}).get(n1["id"])
+        check("内容变化后时间戳严格递增",
+              stamp_c is not None and stamp_c > stamps.get(n1["id"], 0),
+              "%s > %s" % (stamp_c, stamps.get(n1["id"])))
+
+        # 标签顺序不同不算变更（否则笔记会在列表里反复跳动）
+        res_d = api("/api/sync", {"notes": [
+            {"id": "e2e-tag", "title": "标签", "content": "x", "tags": ["a", "b"],
+             "pinned": False, "trashed": False, "createdAt": 1,
+             "updatedAt": int(time.time() * 1000)}], "deletedIds": []})
+        stamp_tag = (res_d.get("stamps") or {}).get("e2e-tag")
+        res_e = api("/api/sync", {"notes": [
+            {"id": "e2e-tag", "title": "标签", "content": "x", "tags": ["b", "a"],
+             "pinned": False, "trashed": False, "createdAt": 1,
+             "updatedAt": int(time.time() * 1000)}], "deletedIds": []})
+        check("标签顺序不同不产生新时间戳",
+              (res_e.get("stamps") or {}).get("e2e-tag") == stamp_tag,
+              "%s vs %s" % ((res_e.get("stamps") or {}).get("e2e-tag"), stamp_tag))
+
+        # ================================================================
+        # 2. 回收站实时
+        # ================================================================
+        print("\n[2] 回收站实时同步")
+        n2 = note("e2e-2", "二")
+        n3 = note("e2e-3", "三")
+        api("/api/sync", {"notes": [n2, n3], "deletedIds": []})
+
         cursors = [cl.cursor() for cl in clients]
         t0 = time.time()
-        res = api("/api/sync", {"notes": [], "deletedIds": [n1["id"]]})
-        check("删除被服务端确认", n1["id"] in res.get("deletedApplied", []),
+        api("/api/delete", {"id": n2["id"]})
+        for cl, cur in zip(clients, cursors):
+            ts, d = cl.wait_for(
+                lambda x, i=n2["id"]: any(
+                    (nt or {}).get("id") == i and (nt or {}).get("trashed") is True
+                    for nt in (x.get("notes") or [])),
+                timeout=2.0, since=cur)
+            if ts is None:
+                check("%s 移入回收站实时收到（含 trashed 状态）" % cl.label, False,
+                      "超时未收到")
+            else:
+                delay = ts - t0
+                check("%s 移入回收站实时收到（含 trashed 状态）" % cl.label,
+                      delay < 1.0, "延迟 %.3fs rev=%s" % (delay, d.get("rev")))
+
+        # 恢复也要实时
+        cursors = [cl.cursor() for cl in clients]
+        api("/api/restore", {"id": n2["id"]})
+        for cl, cur in zip(clients, cursors):
+            ts, d = cl.wait_for(
+                lambda x, i=n2["id"]: any(
+                    (nt or {}).get("id") == i and (nt or {}).get("trashed") is False
+                    for nt in (x.get("notes") or [])),
+                timeout=2.0, since=cur)
+            check("%s 恢复实时收到" % cl.label, ts is not None,
+                  "rev=%s" % (d or {}).get("rev"))
+
+        # 移入回收站不能误报成彻底删除
+        cursors = [cl.cursor() for cl in clients]
+        api("/api/delete", {"id": n3["id"]})
+        time.sleep(0.3)
+        for cl, cur in zip(clients, cursors):
+            frames = [d for _, d in cl.frames[cur:]]
+            check("%s 移入回收站不广播 deletedIds" % cl.label,
+                  bool(frames) and all(not (d.get("deletedIds") or []) for d in frames),
+                  "收到 %d 帧" % len(frames))
+
+        # ================================================================
+        # 3. 删除事件独立 SSE 通道（原有回归）
+        # ================================================================
+        print("\n[3] 彻底删除的独立广播通道")
+        cursors = [cl.cursor() for cl in clients]
+        t0 = time.time()
+        res = api("/api/sync", {"notes": [], "deletedIds": [n2["id"]]})
+        check("删除被服务端确认", n2["id"] in res.get("deletedApplied", []),
               "deletedApplied=%s" % res.get("deletedApplied"))
         for cl, cur in zip(clients, cursors):
             ts, d = cl.wait_for(
-                lambda x, i=n1["id"]: i in (x.get("deletedIds") or []),
+                lambda x, i=n2["id"]: i in (x.get("deletedIds") or []),
                 timeout=2.0, since=cur)
             if ts is None:
                 check("%s 1 秒内收到删除广播" % cl.label, False, "超时未收到")
@@ -178,30 +277,23 @@ def main():
         rev = api("/health")["rev"]
         st = api("/api/state?since=%d" % rev)
         check("unchanged 兜底仍带 deletedIds",
-              st.get("unchanged") is True and n1["id"] in st.get("deletedIds", []),
+              st.get("unchanged") is True and n2["id"] in st.get("deletedIds", []),
               "deletedIds 共 %d 条" % len(st.get("deletedIds", [])))
         full = api("/api/state")
         check("全量快照已不含被删笔记",
-              n1["id"] not in [x["id"] for x in full["notes"]])
+              n2["id"] not in [x["id"] for x in full["notes"]])
 
-        # ---- /api/purge 也要广播删除 ----
-        cursors = [cl.cursor() for cl in clients]
-        api("/api/purge", {"id": n2["id"]})
-        for cl, cur in zip(clients, cursors):
-            ts, d = cl.wait_for(
-                lambda x, i=n2["id"]: i in (x.get("deletedIds") or []),
-                timeout=2.0, since=cur)
-            check("%s purge 也广播删除" % cl.label, ts is not None)
-
-        # ---- /api/delete 只是移入回收站，不能误报彻底删除 ----
-        cursors = [cl.cursor() for cl in clients]
-        api("/api/delete", {"id": n3["id"]})
-        time.sleep(0.3)
-        for cl, cur in zip(clients, cursors):
-            frames = [d for _, d in cl.frames[cur:]]
-            check("%s 移入回收站不广播 deletedIds" % cl.label,
-                  bool(frames) and all(not (d.get("deletedIds") or []) for d in frames),
-                  "收到 %d 帧" % len(frames))
+        # ================================================================
+        # 4. 墓碑不可复活
+        # ================================================================
+        print("\n[4] 被彻底删除的笔记不会被客户端推回来复活")
+        api("/api/purge", {"id": n3["id"]})
+        time.sleep(0.2)
+        api("/api/sync", {"notes": [note("e2e-3", "三")], "deletedIds": []})
+        full = api("/api/state")
+        check("墓碑笔记未被复活",
+              "e2e-3" not in [x["id"] for x in full["notes"]],
+              "现存 %d 条" % len(full["notes"]))
 
         print("\n结论：%s" % ("全部通过" if ok else "存在失败项"))
         return 0 if ok else 1

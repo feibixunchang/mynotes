@@ -11,7 +11,7 @@ import 'package:path/path.dart' as p;
 import 'app_version.dart';
 import 'db.dart';
 
-/// 自动更新：检查 GitHub 官方 Release -> 多渠道并发测速选最快 -> 下载
+/// 自动更新：检查 GitHub 官方 Release -> 多渠道并发分段下载（自动选最快）
 /// -> 校验官方 SHA-256 -> 自动替换并重启。
 ///
 /// 隐私约定（重要）：
@@ -159,7 +159,7 @@ class UpdateService {
       if (!autoEnabled) return;
       final now = DateTime.now().millisecondsSinceEpoch;
       if (now < postponeUntil || now - lastCheckAt < 6 * 3600 * 1000) return;
-      await Future.delayed(const Duration(seconds: 10));
+      await Future.delayed(const Duration(seconds: 3));
       await checkAndUpdate();
     } catch (_) {
       // 更新检查失败绝不能影响主程序使用，下次启动再试。
@@ -193,15 +193,14 @@ class UpdateService {
       _set(
         status: UpdateStatus.downloading,
         version: rel.version,
-        message: '发现 v${rel.version}，正在选择最快渠道…',
+        message: '发现 v${rel.version}，正在多渠道并发下载…',
         progress: 0,
       );
-      final channel = await _fastestChannel(rel.url) ?? rel.url;
-      var file = await _download(rel, channel);
-      // 最快的渠道中途失败时，用官方直连重试一次。
-      if (file == null && channel != rel.url) {
-        file = await _download(rel, rel.url);
-      }
+      // 并发分段下载本身就在测速：快的渠道会领到更多分片，慢渠道自然落后。
+      // 不再先花最多 6 秒做一次「首字节探测」，第一段请求就是真实数据。
+      var file = await _download(rel, rel.url);
+      // 镜像都不支持 Range 或并发下载失败时，退回官方单连接，保证可用。
+      if (file == null) file = await _downloadSingle(rel, rel.url);
       if (file == null) {
         _set(status: UpdateStatus.failed, message: '下载失败，稍后会自动重试');
         return;
@@ -231,7 +230,7 @@ class UpdateService {
         progress: 1,
       );
       // 给一个可取消的窗口，但默认无需任何操作：倒计时结束自动安装。
-      await Future.delayed(const Duration(seconds: 15));
+      await Future.delayed(const Duration(seconds: 6));
       if (state.value.status == UpdateStatus.ready && autoEnabled) {
         await installNow();
       }
@@ -265,18 +264,25 @@ class UpdateService {
   // ---------- 版本元信息 ----------
 
   Future<_Release?> _fetchLatest() async {
-    final done = Completer<_Release?>();
-    var left = _metaUrls.length;
-    for (final url in _metaUrls) {
-      // ignore: discarded_futures
-      _getJson(url).then((j) {
-        final rel = j == null ? null : _parseRelease(j);
-        if (rel != null && !done.isCompleted) done.complete(rel);
-        left--;
-        if (left == 0 && !done.isCompleted) done.complete(null);
-      });
+    // 短窗口内收齐所有元数据源，取「版本号最高」且带官方校验值的结果。
+    // 以前取第一个成功的源：发布窗口内 jsdelivr 缓存若是旧清单且比
+    // GitHub API 先返回，客户端会误判「已是最新」，要等 CDN 过期才发现新版。
+    final results = await Future.wait(_metaUrls.map(_getJson).toList())
+        .timeout(const Duration(seconds: 11),
+            onTimeout: () => <Map<String, dynamic>?>[]);
+    _Release? best;
+    for (final j in results) {
+      final rel = j == null ? null : _parseRelease(j);
+      if (rel == null) continue;
+      if (best == null ||
+          _compare(rel.version, best.version) > 0 ||
+          (_compare(rel.version, best.version) == 0 &&
+              best.sha256 == null &&
+              rel.sha256 != null)) {
+        best = rel;
+      }
     }
-    return done.future;
+    return best;
   }
 
   Future<Map<String, dynamic>?> _getJson(String url) async {
@@ -347,41 +353,123 @@ class UpdateService {
   List<String> _channels(String url) =>
       _mirrorPrefixes.map((m) => m.isEmpty ? url : '$m$url').toList();
 
-  Future<String?> _fastestChannel(String url) async {
-    final urls = _channels(url);
-    final done = Completer<String?>();
-    var left = urls.length;
-    for (final u in urls) {
-      // ignore: discarded_futures
-      _probe(u).then((ok) {
-        if (ok && !done.isCompleted) done.complete(u);
-        left--;
-        if (left == 0 && !done.isCompleted) done.complete(null);
-      });
+  /// 多渠道并发分段下载：把安装包切成 2MB 小块，每个渠道开 2 个 worker，
+  /// 谁快谁就多领几块（work-stealing），慢渠道自动落后、不拖累整体。
+  /// 一次实现两件事：自动选最快通道 + 叠加多通道带宽。
+  /// 每段独立重试其它渠道；整包完成后仍以官方 SHA-256 强校验为准。
+  Future<File?> _download(_Release rel, String url) async {
+    final total = rel.size;
+    final channels = _channels(url);
+    if (total < 1024 * 1024) return _downloadSingle(rel, url);
+
+    const int partSize = 2 * 1024 * 1024;
+    final count = (total / partSize).ceil();
+    Directory? dir;
+    try {
+      dir = await Directory.systemTemp.createTemp('mynotes-upd-');
+      var nextPart = 0;
+      var totalGot = 0;
+      var lastProgress = -0.02;
+      void bump(int n) {
+        totalGot += n;
+        final progress = (totalGot / total).clamp(0.0, 1.0);
+        if (progress - lastProgress < 0.01 && progress < 1) return;
+        lastProgress = progress;
+        _set(
+          status: UpdateStatus.downloading,
+          version: rel.version,
+          progress: progress,
+          message: '正在下载 v${rel.version} · ${_mb(totalGot)} / ${_mb(total)}',
+        );
+      }
+
+      // 4 渠道 × 2 连接。Dart 单线程事件循环里 nextPart++ 是原子的。
+      final workers = <Future<bool>>[];
+      for (var w = 0; w < channels.length * 2; w++) {
+        workers.add(() async {
+          while (true) {
+            final idx = nextPart++;
+            if (idx >= count) return true;
+            var bytes = -1;
+            for (var r = 0; r < channels.length && bytes < 0; r++) {
+              bytes = await _fetchRange(
+                  channels[(w + r) % channels.length], dir!,
+                  idx, partSize, total);
+            }
+            if (bytes < 0) return false;
+            bump(bytes);
+          }
+        }());
+      }
+      final results = await Future.wait(workers);
+      if (results.any((ok) => !ok)) return null;
+
+      final out = File(p.join(dir.path, rel.assetName));
+      final sink = out.openWrite();
+      for (var i = 0; i < count; i++) {
+        final part = File(p.join(dir.path, 'part_$i'));
+        if (!await part.exists() || await part.length() == 0) {
+          await sink.close();
+          return null;
+        }
+        await sink.addStream(part.openRead());
+      }
+      await sink.close();
+      if (await out.length() != total) return null;
+      return out;
+    } catch (_) {
+      return null;
+    } finally {
+      // 分片只是中间产物，最终交付的整包不受影响。
+      if (dir != null) {
+        for (var i = 0; i < count; i++) {
+          try {
+            await File(p.join(dir.path, 'part_$i')).delete();
+          } catch (_) {}
+        }
+      }
     }
-    return done.future;
   }
 
-  Future<bool> _probe(String url) async {
+  /// 下载第 idx 个 Range 分片，返回成功写入的字节数；失败返回 -1。
+  /// 只接受 206：返回 200 说明渠道忽略了 Range，会把整包写进一个分片。
+  Future<int> _fetchRange(String url, Directory dir, int idx, int partSize,
+      int total) async {
     HttpClient? client;
+    IOSink? sink;
+    final start = idx * partSize;
+    final end = math.min(total, start + partSize) - 1;
+    final expected = end - start + 1;
     try {
-      client = HttpClient()..connectionTimeout = const Duration(seconds: 4);
+      client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
       final req = await client.getUrl(Uri.parse(url));
       req.headers.set('User-Agent', _ua);
-      req.headers.set('Range', 'bytes=0-16383');
-      final resp = await req.close().timeout(const Duration(seconds: 6));
-      if (resp.statusCode != 200 && resp.statusCode != 206) return false;
-      // 只读一小块确认可达，随后立即断开，不浪费流量。
-      await resp.first.timeout(const Duration(seconds: 5));
-      return true;
+      req.headers.set('Range', 'bytes=$start-$end');
+      final resp = await req.close().timeout(const Duration(seconds: 20));
+      if (resp.statusCode != 206) return -1;
+      sink = File(p.join(dir.path, 'part_$idx')).openWrite();
+      var received = 0;
+      await for (final chunk in resp) {
+        if (received + chunk.length > expected) return -1;
+        sink.add(chunk);
+        received += chunk.length;
+      }
+      await sink.flush();
+      await sink.close();
+      sink = null;
+      return received == expected ? received : -1;
     } catch (_) {
-      return false;
+      return -1;
     } finally {
+      try {
+        await sink?.close();
+      } catch (_) {}
       client?.close(force: true);
     }
   }
 
-  Future<File?> _download(_Release rel, String url) async {
+  /// 官方单连接兜底：镜像全部不支持 Range / 并发下载失败时使用。
+  Future<File?> _downloadSingle(_Release rel, String url) async {
     IOSink? sink;
     HttpClient? client;
     try {

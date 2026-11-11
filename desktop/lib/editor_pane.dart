@@ -121,7 +121,7 @@ class _EditorPaneState extends State<EditorPane> {
     NotesDb.updateNote(n).catchError((e) {
       return null;
     });
-    SyncService.i.markDirty();
+    SyncService.i.markDirty(n.id);
   }
 
   void _saveNow() {
@@ -397,6 +397,7 @@ class _EditorPaneState extends State<EditorPane> {
                     }
                     final finalIds = [...selected.toList(), ...realNew];
                     await NotesDb.setTags(widget.noteId, finalIds);
+                    SyncService.i.markDirty(widget.noteId);
                     final refreshed = await NotesDb.getNote(widget.noteId);
                     if (mounted) setState(() => note = refreshed);
                     Navigator.of(context).pop();
@@ -535,6 +536,7 @@ class _EditorPaneState extends State<EditorPane> {
                               final ids = (await NotesDb.getTagIds(widget.noteId))
                                 ..remove(removeId);
                               await NotesDb.setTags(widget.noteId, ids);
+                              SyncService.i.markDirty(widget.noteId);
                               final refreshed = await NotesDb.getNote(widget.noteId);
                               if (mounted) setState(() => note = refreshed);
                             }),
@@ -577,6 +579,7 @@ class _EditorPaneState extends State<EditorPane> {
                             onPressed: () async {
                               n.pinned = !n.pinned;
                               await NotesDb.updateNote(n);
+                              SyncService.i.markDirty(n.id);
                               widget.onChanged();
                             }),
                         IconButton(
@@ -585,6 +588,7 @@ class _EditorPaneState extends State<EditorPane> {
                             visualDensity: VisualDensity.compact,
                             onPressed: () async {
                               await NotesDb.softDelete(widget.noteId);
+                              SyncService.i.markDirty(widget.noteId);
                               widget.onChanged();
                               widget.onClose();
                             }),

@@ -120,6 +120,10 @@ class SyncService extends ChangeNotifier {
   // 这样导入大批笔记后重启不会被误清空。
   int _epoch = int.tryParse(SettingsStore.readSync('syncEpoch', '-1')) ?? -1;
   bool _dirty = false;
+  // 本地改动过、尚未推送成功的笔记 id 集合（按笔记粒度）。
+  // 只用全局 _dirty 的话，一处改动会连带把整个库推上去，
+  // 覆盖其它端刚写入的内容。
+  Set<String> _dirtyIds = <String>{};
   bool _pushing = false;
   bool _pulling = false;
   // SSE 事件撞上正在进行的 pull 时记一笔，pull 结束后补跑，避免整批变更丢失。
@@ -129,11 +133,17 @@ class SyncService extends ChangeNotifier {
   Timer? _poll;
   HttpClient? _sseClient;
 
-  void markDirty() {
+  /// 标记本机有改动需要上推。
+  /// 传入笔记 id 时只把这一条计入脏集合；不传则退化为全局标记
+  /// （仅用于「有改动」这个状态提示，实际推送内容以数据库脏标记为准）。
+  void markDirty([String? noteId]) {
     _dirty = true;
-    // 秒级上推：2 秒防抖
+    if (noteId != null) {
+      _dirtyIds.add(noteId);
+    }
+    // 本地改动 0.6 秒内上推，缩短另一端感知延迟。
     _pushTimer?.cancel();
-    _pushTimer = Timer(const Duration(milliseconds: 1800), () => push());
+    _pushTimer = Timer(const Duration(milliseconds: 600), () => push());
   }
 
   void start() {
@@ -153,7 +163,9 @@ class SyncService extends ChangeNotifier {
     // 每 30 秒兜底：脏数据就上推；否则轻量拉取（服务端 unchanged 直接返回空）。
     // 这样启动瞬间的短暂失败会在下一轮自动恢复，状态栏不会长期挂着红色错误。
     _poll = Timer.periodic(const Duration(seconds: 30), (_) async {
-      if (_dirty) await push();
+      // 数据库里还有未推送的笔记就推：应用重启后全局 _dirty 会丢，
+      // 但脏标记是持久化的，不能因此漏推。
+      if (_dirty || (await NotesDb.dirtyIds()).isNotEmpty) await push();
       // 无论本地是否有改动都要拉一次：push 不再推进 _rev，远端删除
       // （含 SSE 断线期间漏掉的）在这里也能被兜住，不必等下一次 rev 变化。
       await pull(silent: true);
@@ -175,10 +187,23 @@ class SyncService extends ChangeNotifier {
     try {
       final books = await NotesDb.listBooks();
       final nameOf = <String, String>{for (final b in books) b.id: b.name};
-      final all = <Note>[];
-      all.addAll(await NotesDb.listNotes('', trash: false));
-      all.addAll(await NotesDb.listNotes('', trash: true));
+      // 只推「本机真正改动过」的笔记。以前每次都推全量，一端的旧快照会把
+      // 另一端刚写入的新内容覆盖回去 —— 这是「三端内容互相打架、回收站
+      // 状态乱跳」的另一个根因。
+      final all = await NotesDb.dirtyNotes();
       final tombs = await NotesDb.tombstones();
+      if (all.isEmpty && tombs.isEmpty) {
+        _dirty = false;
+        lastOk = true;
+        resultText = '已是最新';
+        notifyListeners();
+        return;
+      }
+      // 记录本次发送的内容指纹。推送期间用户可能又改了同一条笔记，
+      // 只有内容没再变的那几条才能算「已被服务端确认」。
+      final sent = <String, String>{
+        for (final n in all) n.id: _fingerprint(n)
+      };
       final body = jsonEncode({
         "notes": all
             .map((n) => {
@@ -207,13 +232,38 @@ class SyncService extends ChangeNotifier {
         return;
       }
       if (res["ok"] == true) {
-        _dirty = false;
+        // 服务端已确认收到这批笔记：只清「内容没再变」的脏标记，
+        // 推送期间新改的内容要留给下一轮，避免丢失用户刚敲的字。
+        final confirmed = <String>[];
+        for (final n in all) {
+          final now = await NotesDb.getNote(n.id);
+          if (now != null && _fingerprint(now) == sent[n.id]) {
+            confirmed.add(n.id);
+          }
+        }
+        await NotesDb.clearDirty(confirmed);
+        _dirty = (await NotesDb.dirtyIds()).isNotEmpty;
         // 关键：push 的响应 rev 只表示「服务端处理到哪一次变更」，不代表本端
         // 已经看到该 rev 里的远端改动（尤其是彻底删除）。若在这里推进 _rev，
         // 紧随其后的 pull() 会命中 unchanged 短路，删除列表永远收不到。
         // _rev 只允许由 pull() 的成功响应推进。
         lastOk = true;
         resultText = '已同步 ${all.length} 条';
+        // 服务端回传权威时间戳：把本地时间戳对齐过去，
+        // 三端才会用同一套时间戳排出完全一致的列表顺序。
+        final stamps = (res["stamps"] as Map?)?.cast<String, dynamic>();
+        if (stamps != null && stamps.isNotEmpty) {
+          // 只对已确认的笔记套用服务端权威时间戳；
+          // 刚改过还没上推的笔记保持本地时间戳，等下一轮再对齐。
+          final safe = <String, dynamic>{
+            for (final id in confirmed)
+              if (stamps[id] != null) id: stamps[id]
+          };
+          if (safe.isNotEmpty) {
+            await NotesDb.applyServerStamps(safe);
+            SyncService.dataVersion.value++;
+          }
+        }
         // 服务端确认已处理删除列表后，本地墓碑即可清掉。
         if (res.containsKey('deletedApplied')) {
           await NotesDb.forgetTombstones(tombs.keys);
@@ -330,6 +380,7 @@ class SyncService extends ChangeNotifier {
       final remoteEpoch = (res["epoch"] as num?)?.toInt() ?? 0;
       if (_epoch >= 0 && remoteEpoch > 0 && remoteEpoch != _epoch) {
         await NotesDb.clearAllNotes();
+        SyncService.dataVersion.value++;
       }
       if (remoteEpoch != _epoch) {
         _epoch = remoteEpoch;
@@ -340,6 +391,8 @@ class SyncService extends ChangeNotifier {
       // 本机已永久删除的笔记，旧服务端仍会把它发回来；用墓碑挡住，
       // 否则「彻底删除 / 清空回收站」看起来永远删不掉。
       final tombs = await NotesDb.tombstones();
+      // 刷新脏集合：只有本地确实改动过、且尚未推送成功的笔记才受保护。
+      _dirtyIds = await NotesDb.dirtyIds();
       var applied = 0;
       for (final item in remote) {
         if (item is! Map) continue;
@@ -348,13 +401,43 @@ class SyncService extends ChangeNotifier {
         final ru = (item["updatedAt"] as num?)?.toInt() ?? 0;
         final tombAt = tombs[id] ?? 0;
         if (tombAt > 0 && tombAt >= ru) continue;
+        final snapshot = Map<String, dynamic>.from(item);
         final local = await NotesDb.getNote(id);
         if (local == null) {
-          await NotesDb.importOne(Map<String, dynamic>.from(item));
+          await NotesDb.applyRemoteSnapshot(snapshot);
           applied++;
-        } else if (ru > local.updatedAt) {
-          await NotesDb.applyRemote(local, Map<String, dynamic>.from(item));
-          applied++;
+        } else {
+          // 分项裁决，与 _applySnapshot 保持一致：
+          // 正文冲突 → 保护本地未推送的编辑；
+          // 状态冲突（回收站 / 置顶 / 笔记本）→ 立刻跟随远端。
+          final dirty = await _isLocallyDirty(id);
+          final stateDiffers = _snapshotDiffers(local, snapshot);
+          if (!dirty) {
+            if (stateDiffers) {
+              await NotesDb.applyRemoteSnapshot(snapshot);
+              applied++;
+            } else if (ru > 0 && ru != local.updatedAt) {
+              // 内容一致、时间戳不同：对齐到服务端权威时间戳，
+              // 三端才能排出完全一样的顺序。
+              await NotesDb.applyServerStamps({id: ru});
+              applied++;
+            }
+          } else if (stateDiffers) {
+            final remoteTrashed = snapshot['trashed'] == true;
+            final remotePinned = snapshot['pinned'] == true;
+            final remoteBook = (snapshot['bookId'] ?? '').toString();
+            if (remoteTrashed != local.trashed ||
+                remotePinned != local.pinned ||
+                (remoteBook.isNotEmpty && remoteBook != local.bookId)) {
+              await NotesDb.applyRemoteState(id,
+                  trashed: remoteTrashed,
+                  pinned: remotePinned,
+                  bookId: remoteBook,
+                  updatedAt: ru);
+              applied++;
+            }
+          }
+          // 正文冲突（且状态一致）：保护本地，等 push 后由服务端裁决。
         }
       }
       if (purged > 0) applied++;
@@ -363,7 +446,8 @@ class SyncService extends ChangeNotifier {
       lastError = null;
       resultText = applied > 0 ? '已同步（收到 $applied 条）' : '已同步';
       if (applied > 0) {
-        _dirty = false;
+        // _dirty 只能由 push() 成功清除。收到远端数据就清，会丢掉本地
+        // 尚未上推的编辑。
         SyncService.dataVersion.value++;
       }
       notifyListeners();
@@ -376,6 +460,162 @@ class SyncService extends ChangeNotifier {
         Future.microtask(() => unawaited(pull()));
       }
     }
+  }
+
+  /// 这条笔记本地是否还有「尚未推送成功」的改动。
+  /// 以数据库 dirty 列为准（持久化、重启后仍在），内存里的 _dirtyIds 只是
+  /// 快速路径的补充——SSE 事件帧走 applyRemoteEvent，不会经过 pull()，
+  /// 只看内存集合会漏判，把用户刚写的内容覆盖成远端旧版本。
+  Future<bool> _isLocallyDirty(String id) async {
+    if (_dirtyIds.contains(id)) return true;
+    return NotesDb.isDirty(id);
+  }
+
+  /// 内容指纹：用于判断「推送期间这条笔记有没有被再次修改」。
+  String _fingerprint(Note n) => [
+        n.title,
+        n.body,
+        n.pinned ? '1' : '0',
+        n.trashed ? '1' : '0',
+        (n.tags.toList()..sort()).join(','),
+      ].join('\u0001');
+
+  /// 判断服务端快照与本地笔记是否有实质差异。
+  /// 只看时间戳不够：移入回收站 / 恢复 / 置顶可能留下相同的 updatedAt，
+  /// 却必须同步；反过来完全相同就不必重复写库、重刷界面。
+  /// 标签按集合比较（顺序可能不同），笔记本名称也要比。
+  bool _snapshotDiffers(Note local, Map item) {
+    final body = (item['content'] ?? item['body'] ?? '') as String;
+    final title = (item['title'] ?? '') as String;
+    final remoteTags =
+        ((item['tags'] as List?) ?? const []).map((e) => e.toString()).toList()
+          ..sort();
+    final localTags = local.tags.toList()..sort();
+    final remoteBook = (item['bookId'] ?? '').toString();
+    return local.body != body ||
+        (title.isNotEmpty && local.title != title) ||
+        local.pinned != (item['pinned'] == true) ||
+        local.trashed != (item['trashed'] == true) ||
+        localTags.join(',') != remoteTags.join(',') ||
+        (remoteBook.isNotEmpty && local.bookId != remoteBook);
+  }
+
+  /// 正文（标题 + 内容 + 标签）是否与远端不同。
+  /// 回收站 / 置顶 / 笔记本属于「状态」，与「正文」分开裁决：
+  /// 本地未推送的编辑必须保护正文（否则用户丢字），
+  /// 但状态必须立刻跟随远端（否则回收站不同步）。
+  bool _contentDiffers(Note local, Map item) {
+    final body = (item['content'] ?? item['body'] ?? '') as String;
+    final title = (item['title'] ?? '') as String;
+    final remoteTags =
+        ((item['tags'] as List?) ?? const []).map((e) => e.toString()).toList()
+          ..sort();
+    final localTags = local.tags.toList()..sort();
+    return local.body != body ||
+        (title.isNotEmpty && local.title != title) ||
+        localTags.join(',') != remoteTags.join(',');
+  }
+
+  /// 落地一条服务端笔记快照，返回是否真的写入了数据库。
+  Future<bool> _applySnapshot(
+      Map item, Set<String> deleted, Map<String, int> tombs) async {
+    final id = item['id'] as String?;
+    if (id == null || deleted.contains(id)) return false;
+    final ru = (item['updatedAt'] as num?)?.toInt() ?? 0;
+    final tombAt = tombs[id] ?? 0;
+    if (tombAt > 0 && tombAt >= ru) return false;
+    final snapshot = Map<String, dynamic>.from(item);
+    final local = await NotesDb.getNote(id);
+    if (local == null) {
+      await NotesDb.applyRemoteSnapshot(snapshot);
+      return true;
+    }
+    final dirty = await _isLocallyDirty(id);
+    final contentDiffers = _contentDiffers(local, snapshot);
+    final stateDiffers = _snapshotDiffers(local, snapshot);
+
+    if (!dirty) {
+      // 本地没有未推送的编辑：远端版本直接落地。
+      if (!stateDiffers) {
+        // 内容一致但时间戳可能不同：对齐到服务端权威时间戳，
+        // 三端才能排出完全一样的顺序。
+        if (ru > 0 && ru != local.updatedAt) {
+          await NotesDb.applyServerStamps({id: ru});
+          return true;
+        }
+        return false;
+      }
+      await NotesDb.applyRemoteSnapshot(snapshot);
+      return true;
+    }
+
+    // 本地还有未推送的编辑：分项裁决。
+    // 1) 正文冲突 → 保护本地（用户刚敲的字不能被远端旧版本覆盖）。
+    // 2) 状态冲突（回收站 / 置顶 / 笔记本）→ 必须立刻跟随远端，
+    //    否则「另一端删了，这端还在正常列表里」就永远修不好。
+    //    落地时只改状态字段，正文保留本地，脏标记保留（下次 push 会带上）。
+    if (stateDiffers) {
+      final remoteTrashed = snapshot['trashed'] == true;
+      final remotePinned = snapshot['pinned'] == true;
+      final remoteBook = (snapshot['bookId'] ?? '').toString();
+      if (remoteTrashed != local.trashed ||
+          remotePinned != local.pinned ||
+          (remoteBook.isNotEmpty && remoteBook != local.bookId)) {
+        await NotesDb.applyRemoteState(id,
+            trashed: remoteTrashed,
+            pinned: remotePinned,
+            bookId: remoteBook,
+            updatedAt: ru);
+        return true;
+      }
+    }
+    if (contentDiffers) {
+      // 只有正文冲突、状态一致：保护本地正文，等 push 后由服务端裁决。
+      return false;
+    }
+    return false;
+  }
+
+  /// 处理新版服务端的 SSE 事件帧：帧里直接带变更笔记全文、永久删除 id
+  /// 与 epoch，收到同一帧即可落地，不再反查 /api/state。
+  /// 以前广播只带 changed 的 id，客户端要二次拉取，会被 unchanged 短路、
+  /// pull 撞车、rev 对齐丢事件 —— 这就是三端不实时的根因。返回落地条数。
+  Future<int> applyRemoteEvent(Map<String, dynamic> d) async {
+    final ids = ((d['deletedIds'] as List?) ?? const [])
+        .whereType<String>()
+        .toSet();
+    final tombs = await NotesDb.tombstones();
+    var changed = 0;
+
+    final remoteEpoch = (d['epoch'] as num?)?.toInt() ?? _epoch;
+    if (_epoch >= 0 && remoteEpoch > 0 && remoteEpoch != _epoch) {
+      await NotesDb.clearAllNotes();
+      _epoch = remoteEpoch;
+      await SettingsStore.write('syncEpoch', '$_epoch');
+      changed++;
+    }
+
+    if (ids.isNotEmpty) {
+      changed += await NotesDb.purgeRemoteIds(ids.toList());
+    }
+    for (final raw in (d['notes'] as List?) ?? const []) {
+      if (raw is! Map) continue;
+      if (await _applySnapshot(raw, ids, tombs)) changed++;
+    }
+
+    final rev = (d['rev'] as num?)?.toInt();
+    // partial 帧不带全文，留给紧随其后的全量 pull 去推进 rev。
+    if (rev != null && d['partial'] != true) _rev = rev;
+
+    if (changed > 0) {
+      atMs = DateTime.now().millisecondsSinceEpoch;
+      lastOk = true;
+      lastError = null;
+      resultText = '已同步（收到 $changed 条变更）';
+      SyncService.dataVersion.value++;
+      notifyListeners();
+    }
+    return changed;
   }
 
   /// 立即落地远端删除：SSE 事件到达的同一帧就删本地记录并刷新三栏。
@@ -398,30 +638,35 @@ class SyncService extends ChangeNotifier {
     }
   }
 
-  /// 处理一行 SSE 帧。抽成 public 便于回归测试直接喂服务端帧，
-  /// 也保证「收到删除事件即删」这条路径能被自动化测试覆盖。
+  /// 处理一行 SSE 帧。抽成 public 便于回归测试直接喂服务端帧。
   Future<void> handleSseDataLine(String line) async {
     if (!line.startsWith('data: ')) return;
     final payload = line.substring(6).trim();
     if (payload.isEmpty) return;
-    // 新版服务端把「被彻底删除的 id」直接放进广播载荷：收到即删，
-    // 不再依赖 rev 增量 / unchanged 反查，删除才真正是实时的。
-    // hello 事件也带全部墓碑，重连时能补偿断线期间的删除。
     if (payload.startsWith('{')) {
       try {
         final d = jsonDecode(payload);
         if (d is Map) {
-          final ids = ((d['deletedIds'] as List?) ?? const [])
+          final event = Map<String, dynamic>.from(d);
+          if (event.containsKey('notes')) {
+            // 新版服务端：数据随事件直接下发，收到即落地。
+            await applyRemoteEvent(event);
+            // 批量变更 / 断线重连：帧里不放全文，做一次全量补齐。
+            if (event['partial'] == true || event['hello'] == true) {
+              unawaited(pull(full: true));
+            }
+            return;
+          }
+          // 旧版服务端：只有 id 列表，仍需反查补齐。
+          final ids = ((event['deletedIds'] as List?) ?? const [])
               .whereType<String>()
               .toList();
           if (ids.isNotEmpty) await applyRemoteDeletions(ids);
         }
       } catch (_) {}
     }
-    // 内容变更与 rev 对齐仍走合并拉取；旧版 hello 的纯数字 rev 也兼容。
-    if (payload.startsWith('{') || RegExp(r'^\d+$').hasMatch(payload)) {
-      _schedulePull();
-    }
+    // 旧帧（纯数字 rev）或解析失败：走一次合并拉取兜底。
+    _schedulePull();
   }
 
   /// 合并短时间内的多次 SSE 通知，避免一次批量改动触发多次全量拉取。

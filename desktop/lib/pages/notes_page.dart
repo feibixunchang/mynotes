@@ -183,7 +183,7 @@ class _NotesPageState extends State<NotesPage> {
           ? null
           : (_view == View.tag ? _tagFilter : _selectedBookId);
       final n = await NotesDb.createNote(bookId);
-      SyncService.i.markDirty();
+      SyncService.i.markDirty(n.id);
       if (!mounted) return;
       setState(() => _selectedNoteId = n.id);
       _applyView();
@@ -242,7 +242,7 @@ class _NotesPageState extends State<NotesPage> {
       return;
     }
     await NotesDb.restore(id);
-    SyncService.i.markDirty();
+    SyncService.i.markDirty(id);
     _applyView();
     _refreshTrashCount();
     final n = await NotesDb.getNote(id);
@@ -260,7 +260,7 @@ class _NotesPageState extends State<NotesPage> {
     if (!ok) return;
     await NotesDb.purge(id);
     SyncService.i.notifyDeleted([id]);
-    SyncService.i.markDirty();
+    SyncService.i.markDirty(id);
     _refreshTrashCount();
     if (mounted && _selectedNoteId == id) setState(() => _selectedNoteId = null);
     _applyView();
@@ -994,28 +994,6 @@ class _NotesPageState extends State<NotesPage> {
                 Text(formatTimeShort(n.updatedAt),
                     style: const TextStyle(
                         fontSize: kFontTiny, color: kSubTextColor)),
-                // 回收站操作按钮放在标题行常显：以前藏在「有摘要才显示」的
-                // 第二行里，空笔记完全没有按钮，13px 图标还极易误触。
-                if (n.trashed) ...[
-                  const SizedBox(width: 2),
-                  IconButton(
-                      icon: const Icon(Icons.restore_from_trash, size: 16),
-                      tooltip: '还原笔记（需确认）',
-                      visualDensity: VisualDensity.compact,
-                      padding: const EdgeInsets.all(2),
-                      constraints: const BoxConstraints(
-                          minWidth: 28, minHeight: 28),
-                      onPressed: () => _restore(n.id)),
-                  IconButton(
-                      icon: const Icon(Icons.delete_forever, size: 16,
-                          color: Color(0xFFCC3333)),
-                      tooltip: '彻底删除（需确认）',
-                      visualDensity: VisualDensity.compact,
-                      padding: const EdgeInsets.all(2),
-                      constraints: const BoxConstraints(
-                          minWidth: 28, minHeight: 28),
-                      onPressed: () => _purge(n.id)),
-                ],
               ],
             ),
             // 第二行：一行摘要 + 标签
@@ -1042,8 +1020,39 @@ class _NotesPageState extends State<NotesPage> {
                   ],
                 ),
               ),
+            // 回收站：把「恢复 / 彻底删除」做成带文字的常显按钮。
+            // 以前只有标题行两个 16px 小图标，用户根本找不到恢复入口。
+            if (n.trashed)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Row(
+                  children: [
+                    _trashActionButton('恢复', Icons.restore_from_trash,
+                        const Color(0xFF4A5EE5), () => _restore(n.id)),
+                    const SizedBox(width: 8),
+                    _trashActionButton('彻底删除', Icons.delete_forever,
+                        const Color(0xFFCC3333), () => _purge(n.id)),
+                  ],
+                ),
+              ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _trashActionButton(String label, IconData icon, Color color,
+      VoidCallback onPressed) {
+    return OutlinedButton.icon(
+      onPressed: onPressed,
+      icon: Icon(icon, size: 14, color: color),
+      label: Text(label, style: TextStyle(fontSize: kFontTiny, color: color)),
+      style: OutlinedButton.styleFrom(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        minimumSize: const Size(0, 28),
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        side: BorderSide(color: color.withValues(alpha: 0.5)),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
       ),
     );
   }

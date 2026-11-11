@@ -35,14 +35,31 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
 TOKEN = os.environ.get("SYNC_TOKEN", "")
 PORT = int(os.environ.get("PORT", "8000"))
-APP_VERSION = "1.3.8"
-BUILD_STAMP = "2026-11-11 09:45"
+APP_VERSION = "1.3.9"
+BUILD_STAMP = "2026-11-11 13:05"
 STATE = os.path.join(DATA_DIR, "state.json")
 LEGACY = os.path.join(DATA_DIR, "snapshot.json")
 MD_DIR = os.path.join(DATA_DIR, "md")
 ATTACH_DIR = os.path.join(DATA_DIR, "attachments")
 LOCK = threading.Lock()
 SUBS = []
+# 单条 SSE 帧最多携带多少条变更笔记全文；超过就只发 partial 标记，
+# 客户端收到后自行做一次全量拉取，避免批量导入时单帧过大阻塞事件通道。
+MAX_EVENT_NOTES = 60
+# 判断一条笔记是否真的变了：以前只比 title/content/trashed，
+# 置顶、标签、笔记本变化不会广播，三端列表也就永远对不上。
+COMPARE_FIELDS = ("title", "content", "trashed", "pinned", "tags", "bookId")
+
+
+def same_tags(a, b):
+    """标签按集合比较：两端保存的标签顺序可能不同，内容相同就不该算变更。
+
+    否则每次 push 都会被判成「有差异」→ 服务端盖新时间戳 → 广播 →
+    其它端再拉回来，笔记会在列表里反复跳动。
+    """
+    if not isinstance(a, list) or not isinstance(b, list):
+        return a == b
+    return sorted(str(x) for x in a) == sorted(str(x) for x in b)
 
 _state = {"rev": 0, "notes": {}, "updatedAt": 0, "epoch": 0, "deleted": {}}
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -130,16 +147,28 @@ def write_md_mirror():
 
 
 def bump(changed, deleted=None):
-    """推进 rev 并广播。
+    """推进 rev，并把「变更笔记全文 + 永久删除 id」随事件一次性广播。
 
-    deleted 是本次被彻底删除的 id 列表：单独放进广播载荷，客户端收到即可
-    直接删本地记录，不必再反查 /api/state（反查会受 rev/unchanged 短路影响）。
+    以前广播里 changed 只是 id 列表，客户端必须再反查
+    /api/state?since=rev。这条反查链路会被 unchanged 短路、pull 撞车、
+    rev 对齐等任一环节丢事件，表现为「移入回收站 / 改内容很久才同步」。
+    现在数据随事件直接下发：客户端收到同一帧即可落地，实时性不再依赖反查。
     """
     _state["rev"] = int(_state.get("rev", 0)) + 1
     _state["updatedAt"] = _now()
     save_state()
-    msg = json.dumps({"rev": _state["rev"], "changed": changed,
-                      "deletedIds": deleted or []})
+    ids = list(dict.fromkeys(str(x) for x in (changed or [])))
+    partial = len(ids) > MAX_EVENT_NOTES
+    notes = [] if partial else [_state["notes"][i] for i in ids
+                                if i in _state["notes"]]
+    msg = json.dumps({
+        "rev": _state["rev"],
+        "epoch": int(_state.get("epoch", 0)),
+        "changed": ids,
+        "notes": notes,
+        "deletedIds": [str(x) for x in (deleted or [])],
+        "partial": partial,
+    }, ensure_ascii=False)
     for q in list(SUBS):
         try:
             q.put_nowait(msg)
@@ -148,22 +177,59 @@ def bump(changed, deleted=None):
 
 
 def merge_notes(items):
+    """合并客户端上推的笔记。
+
+    时间戳必须由服务端裁决，不能直接采信客户端的 updatedAt：
+    两台机器的系统时钟只要有几秒偏差，「客户端时间戳更新」就会把
+    另一端的真实修改判成过期而静默丢弃 —— 表现为「某一端怎么改，
+    其它端都不动」「三端列表顺序还不一样」。
+    这里改成：内容有实质变化就接受，并统一盖上服务端权威时间戳。
+    这样三端最终持有完全相同的时间戳，列表顺序也就完全一致。
+    """
     changed = []
+    stamps = {}
+    now = _now()
     for n in items:
         if not isinstance(n, dict) or not n.get("id"):
             continue
         old = _state["notes"].get(n["id"])
         new_up = int(n.get("updatedAt") or 0)
-        # 已被永久删除的笔记，旧客户端再推回来也不能复活（除非删除之后又有更新）。
-        if int(_state.get("deleted", {}).get(n["id"]) or 0) >= new_up:
+        # 已被永久删除的笔记，任何客户端再推回来都不能复活。
+        # 这里不再拿客户端时间戳做比较：两台机器时钟只要有偏差，
+        # 就会出现「删掉的笔记又冒出来」或「删不掉」。
+        if n["id"] in _state.get("deleted", {}):
             continue
-        if old is None or new_up >= int(old.get("updatedAt") or 0):
+        if old is None:
+            n = dict(n)
+            # 服务端权威时间戳：完全不采信客户端的 updatedAt。
+            # 客户端时钟只要超前，采信它就会把这条笔记排到所有笔记最前面，
+            # 三端排序从此错乱。新笔记一律盖服务端当前时间。
+            n["updatedAt"] = now
             _state["notes"][n["id"]] = n
-            if old is None or (old.get("content") != n.get("content")
-                               or old.get("title") != n.get("title")
-                               or old.get("trashed") != n.get("trashed")):
-                changed.append(n["id"])
-    return changed
+            changed.append(n["id"])
+            stamps[n["id"]] = n["updatedAt"]
+            continue
+        # 内容实质变化才接受。updatedAt 不参与比较：它正是时钟漂移的来源。
+        differs = False
+        for k in COMPARE_FIELDS:
+            if k == "tags":
+                if not same_tags(old.get("tags"), n.get("tags")):
+                    differs = True
+                    break
+            elif old.get(k) != n.get(k):
+                differs = True
+                break
+        if not differs:
+            # 内容一致：仍然回传服务端已有的权威时间戳，客户端据此把本地
+            # 时间戳对齐，三端排序才能完全一样。
+            stamps[n["id"]] = int(old.get("updatedAt") or 0)
+            continue
+        n = dict(n)
+        n["updatedAt"] = max(now, int(old.get("updatedAt") or 0) + 1)
+        _state["notes"][n["id"]] = n
+        changed.append(n["id"])
+        stamps[n["id"]] = n["updatedAt"]
+    return changed, stamps
 
 
 def safe_name(name):
@@ -310,10 +376,18 @@ class H(BaseHTTPRequestHandler):
                 cutoff = _now() - 365 * 24 * 3600 * 1000
                 tombs = [k for k, v in _state.get("deleted", {}).items()
                          if v > cutoff]
-                # hello 也带上全部删除墓碑：断线重连的客户端可立即补偿期间
-                # 漏掉的删除，不必等下一次 rev 变化或 30 秒轮询。
-                hello = json.dumps({"rev": rev, "deletedIds": tombs,
-                                    "changed": []})
+                # hello 带上全部删除墓碑 + partial 标记：断线重连的客户端
+                # 可立即补偿期间漏掉的删除，并做一次全量拉取补齐断线期间的
+                # 内容/回收站变更，不必等下一次 rev 变化或 30 秒轮询。
+                hello = json.dumps({
+                    "rev": rev,
+                    "epoch": int(_state.get("epoch", 0)),
+                    "deletedIds": tombs,
+                    "changed": [],
+                    "notes": [],
+                    "partial": True,
+                    "hello": True,
+                }, ensure_ascii=False)
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
@@ -401,7 +475,7 @@ class H(BaseHTTPRequestHandler):
                 _state["deleted"] = {
                     k: v for k, v in _state.get("deleted", {}).items()
                     if v > cutoff}
-                changed = merge_notes(items)
+                changed, stamps = merge_notes(items)
                 if changed or removed:
                     bump(changed + removed, removed)
                 else:
@@ -409,34 +483,43 @@ class H(BaseHTTPRequestHandler):
             return self._json(200, {"ok": True, "rev": _state["rev"],
                                     "changed": len(changed),
                                     "deletedApplied": removed,
+                                    # 服务端权威时间戳：客户端据此对齐本地时间戳，
+                                    # 三端列表顺序才会完全一致。
+                                    "stamps": stamps,
                                     "count": len(_state["notes"])})
         if u.path == "/api/note":
             note = data.get("note")
             if not isinstance(note, dict) or not note.get("id"):
                 return self._json(400, {"ok": False, "error": "need note.id"})
             with LOCK:
-                changed = merge_notes([note])
+                changed, stamps = merge_notes([note])
                 if changed:
                     bump(changed)
                 else:
                     save_state()
-            return self._json(200, {"ok": True, "rev": _state["rev"]})
+            return self._json(200, {"ok": True, "rev": _state["rev"],
+                                    "stamps": stamps})
         if u.path in ("/api/delete", "/api/restore", "/api/purge"):
             nid = data.get("id")
             with LOCK:
                 if u.path == "/api/purge":
                     _state["notes"].pop(nid, None)
                     _state.setdefault("deleted", {})[nid] = _now()
+                    stamps = {}
                 else:
                     note = _state["notes"].get(nid)
                     if not note:
                         return self._json(404, {"ok": False, "error": "not found"})
                     note["trashed"] = (u.path == "/api/delete")
-                    note["updatedAt"] = _now()
+                    note["updatedAt"] = max(_now(),
+                                            int(note.get("updatedAt") or 0) + 1)
                     _state["notes"][nid] = note
+                    stamps = {nid: note["updatedAt"]}
                 # 只有 /api/purge 是彻底删除；/api/delete 只是移入回收站。
+                # 软删除 / 恢复同样立刻广播，回收站才能三端实时。
                 bump([nid], [nid] if u.path == "/api/purge" else [])
-            return self._json(200, {"ok": True, "rev": _state["rev"]})
+            return self._json(200, {"ok": True, "rev": _state["rev"],
+                                    "stamps": stamps})
         return self._json(404, {"ok": False, "error": "not found"})
 
 

@@ -220,6 +220,7 @@ input,textarea,select{font-family:inherit;font-size:16px;font-weight:500;color:v
       <span class="sp"></span>
       <span id="wc" style="font-size:14px;font-weight:700;color:var(--sub)">0 字</span>
       <button class="btn" id="pinBtn">置顶</button>
+      <button class="btn hide" id="restoreBtn" title="把这条笔记恢复到全部笔记">↩ 恢复</button>
       <button class="btn danger" id="delBtn">删除</button>
       <button class="btn pri" id="saveBtn">保存</button>
     </div>
@@ -238,7 +239,8 @@ input,textarea,select{font-family:inherit;font-size:16px;font-weight:500;color:v
   <div id="status">
     <span><i class="dot off" id="liveDot"></i><span id="liveTxt">连接中…</span></span>
     <span id="cnt">笔记 0 条</span>
-    <span id="lastSave">尚未保存</span>
+    <span id="lastSave">正在同步…</span>
+    <span id="syncState">本地已保存</span>
     <span class="sp"></span>
     <span id="ver" style="font-weight:700;color:#b45309">v…</span>
     <span id="rev">rev -</span>
@@ -311,7 +313,17 @@ function toast(msg) {
   const t = $('#toast'); t.textContent = msg; t.classList.add('show');
   clearTimeout(window._toast); window._toast = setTimeout(() => t.classList.remove('show'), 1900);
 }
+// 状态栏：
+//   lastSave  = 最近一次「与服务端完成同步」的时间
+//   syncState = 本地编辑是否已保存到服务端
+// 以前只有一个 lastSave，文案在「尚未保存 / 已保存 / 已同步」之间来回跳，
+// 用户完全看不懂它是什么意思。现在两者分开，含义固定。
 function flash(msg) { $('#lastSave').textContent = msg; }
+function syncState(msg, ok) {
+  const el = $('#syncState');
+  el.textContent = msg;
+  el.style.color = ok === false ? '#c0392b' : '';
+}
 function titleOf(n) {
   if (n.title && n.title.trim()) return n.title.trim();
   for (const line of (n.content || '').split('\n')) {
@@ -388,7 +400,11 @@ function currentArr() {
   }
   const q = $('#q').value.trim().toLowerCase();
   if (q) arr = arr.filter(n => (titleOf(n) + ' ' + (n.content || '')).toLowerCase().includes(q));
-  return arr.sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || (b.updatedAt || 0) - (a.updatedAt || 0));
+  // 与桌面端 SQL 完全一致：置顶优先 → 更新时间倒序 → id 稳定兜底。
+  // 以前缺少 id 兜底，更新时间相同的笔记在三端会排出不同顺序。
+  return arr.sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0)
+    || (b.updatedAt || 0) - (a.updatedAt || 0)
+    || (String(a.id) < String(b.id) ? -1 : String(a.id) > String(b.id) ? 1 : 0));
 }
 function renderList() {
   const arr = currentArr();
@@ -397,8 +413,19 @@ function renderList() {
       <div class="t">${n.pinned ? '📌 ' : ''}${esc(titleOf(n))}</div>
       <div class="s">${esc(snippetOf(n).slice(0, 70)) || '（空笔记）'}</div>
       <div class="m"><span>${fmt(n.updatedAt)}</span><span>${esc(n.bookId || '默认')}</span>${(n.tags || []).map(t => '<span>#' + esc(t) + '</span>').join('')}</div>
+      ${n.trashed ? `<div class="row" style="gap:6px;margin-top:7px">
+        <button class="btn" data-act="restore" data-id="${esc(n.id)}">↩ 恢复</button>
+        <button class="btn danger" data-act="purge" data-id="${esc(n.id)}">彻底删除</button>
+      </div>` : ''}
     </div>`).join('') || '<div class="empty">这里还没有笔记</div>';
   $('#list').querySelectorAll('.item').forEach(el => el.onclick = () => open(el.dataset.id));
+}
+function clearEditor() {
+  $('#title').value = ''; $('#body').value = '';
+  $('#tagIn').value = ''; $('#bookIn').value = '';
+  $('#wc').textContent = '0 字';
+  $('#restoreBtn').classList.add('hide');
+  if (previewing) renderPreview();
 }
 function open(id) {
   if (dirty && selId) save(true);
@@ -410,6 +437,7 @@ function open(id) {
   $('#bookIn').value = n.bookId || '';
   $('#pinBtn').textContent = n.pinned ? '取消置顶' : '置顶';
   $('#delBtn').textContent = n.trashed ? '彻底删除' : '删除';
+  $('#restoreBtn').classList.toggle('hide', !n.trashed);
   $('#wc').textContent = ($('#body').value || '').length + ' 字';
   dirty = false; renderList();
   if (previewing) renderPreview();
@@ -466,11 +494,23 @@ function save(silent) {
   return api('/api/note', { method: 'POST', body: JSON.stringify({ note: n }) })
     .then(r => {
       rev = r.rev; $('#rev').textContent = 'rev ' + rev;
+      // 服务端回传权威时间戳：网页版也用它，
+      // 三端才会用同一套时间戳排出完全一致的列表顺序。
+      const st = (r && r.stamps) || {};
+      if (st[n.id]) {
+        n.updatedAt = st[n.id];
+        notes.set(n.id, n);
+      }
       renderNav(); renderList();
-      $('#lastSave').textContent = '已保存 ' + fmt(n.updatedAt); dirty = false;
+      syncState('已保存到服务端', true);
+      dirty = false;
       if (!silent) toast('已保存');
     })
-    .catch(e => { flash('保存失败：' + e.message); if (!silent) toast('保存失败'); });
+    .catch(e => {
+      flash('保存失败：' + e.message);
+      syncState('保存失败，正在重试', false);
+      if (!silent) toast('保存失败');
+    });
 }
 function load(full) {
   return api('/api/state' + (full ? '' : '?since=' + rev)).then(d => {
@@ -482,6 +522,8 @@ function load(full) {
       let hit = false;
       gone.forEach(id => { if (notes.delete(id)) hit = true; });
       if (hit) { renderNav(); renderList(); }
+      flash('已同步 ' + fmt(Date.now()));
+      syncState('已保存到服务端', true);
       return;
     }
     rev = d.rev; $('#rev').textContent = 'rev ' + rev;
@@ -502,40 +544,121 @@ function load(full) {
       const keep = new Set((d.notes || []).map(n => n && n.id).filter(Boolean));
       [...notes.keys()].forEach(id => { if (!keep.has(id)) notes.delete(id); });
     }
-    (d.notes || []).forEach(n => { if (n && n.id) notes.set(n.id, n); });
+    (d.notes || []).forEach(n => {
+      if (!n || !n.id) return;
+      // 分项合并：正文冲突时保护本地编辑，状态（回收站/置顶）立刻跟随远端。
+      const editing = dirty && n.id === selId;
+      const cur = notes.get(n.id);
+      if (editing) {
+        const merged = mergeRemote(cur, n);
+        if (merged.changed) notes.set(n.id, merged.note);
+        return;
+      }
+      notes.set(n.id, n);
+    });
     renderNav(); renderList();
+    flash('已同步 ' + fmt(Date.now()));
+    syncState('已保存到服务端', true);
     if (!selId && notes.size && !isNarrow()) {
       const first = [...notes.values()].filter(n => !n.trashed)
         .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))[0];
       if (first) open(first.id);
     }
-  }).catch(e => flash('拉取失败：' + e.message));
+  }).catch(e => {
+    flash('拉取失败：' + e.message);
+    syncState('同步中断，正在重试', false);
+  });
 }
-// 服务端把「被彻底删除的 id」直接放进 SSE 广播与 hello 载荷。收到即从内存
-// 移除并重绘，不依赖 rev 增量 / unchanged 反查，删除才真正实时。
-function applyDeletedEvent(e) {
+// SSE 帧里直接带着「变更笔记全文 + 永久删除 id + epoch」。收到同一帧就落地
+// 并重绘，不再反查 /api/state —— 反查会被 unchanged 短路、rev 对齐、并发
+// load 竞态丢事件，这正是「三端回收站与全部笔记不实时」的根因。
+// 分项合并远端快照：与桌面端 sync.dart 的策略保持一致。
+//   - 正文（标题/内容/标签）冲突且本地正在编辑 → 保护本地，不丢用户刚敲的字；
+//   - 状态（回收站/置顶/笔记本）→ 永远立刻跟随远端，
+//     否则「另一端把笔记删了，这端还躺在正常列表里」就永远修不好。
+function mergeRemote(cur, remote) {
+  if (!cur) return { note: remote, changed: true };
+  const sameTags = (a, b) => {
+    const x = (a || []).slice().sort().join(',');
+    const y = (b || []).slice().sort().join(',');
+    return x === y;
+  };
+  const contentDiffers = (cur.content || '') !== (remote.content || '') ||
+    (remote.title && cur.title !== remote.title) ||
+    !sameTags(cur.tags, remote.tags);
+  const stateDiffers = !!cur.trashed !== !!remote.trashed ||
+    !!cur.pinned !== !!remote.pinned ||
+    (remote.bookId && remote.bookId !== cur.bookId);
+  if (!contentDiffers && !stateDiffers) {
+    // 内容与状态都一致：只对齐服务端权威时间戳，三端排序才能一致。
+    if (remote.updatedAt && cur.updatedAt !== remote.updatedAt) {
+      cur.updatedAt = remote.updatedAt;
+      return { note: cur, changed: true };
+    }
+    return { note: cur, changed: false };
+  }
+  if (stateDiffers) {
+    // 状态立即跟随远端；正文若冲突则保留本地。
+    const merged = Object.assign({}, cur);
+    merged.trashed = !!remote.trashed;
+    merged.pinned = !!remote.pinned;
+    if (remote.bookId) merged.bookId = remote.bookId;
+    if (remote.updatedAt) merged.updatedAt = remote.updatedAt;
+    return { note: merged, changed: true };
+  }
+  // 只有正文冲突：保护本地，等保存后由服务端裁决。
+  return { note: cur, changed: false };
+}
+
+function applyStateEvent(e) {
   let d = null;
   try { d = JSON.parse(e.data); } catch (_) { return; }
-  const ids = (d && d.deletedIds) || [];
-  if (!ids.length) return;
+  if (!d || typeof d !== 'object') return;
+  if (typeof d.rev === 'number') { rev = d.rev; $('#rev').textContent = 'rev ' + rev; }
   let hit = false;
-  ids.forEach(id => { if (notes.delete(id)) hit = true; });
-  if (selId && ids.indexOf(selId) >= 0) {
-    selId = null; $('#title').value = ''; $('#body').value = '';
-    $('#tagIn').value = ''; $('#bookIn').value = '';
+  // 另一端执行了「清空所有笔记」
+  const ep = d.epoch || 0;
+  if (ep > 0 && ep !== epoch) {
+    notes.clear(); selId = null; epoch = ep; clearEditor(); hit = true;
+    toast('另一端已清空全部笔记');
   }
-  if (hit) { renderNav(); renderList(); }
+  // 永久删除：立即从内存移除
+  (d.deletedIds || []).forEach(id => {
+    if (notes.delete(id)) hit = true;
+    if (selId === id) { selId = null; clearEditor(); }
+  });
+  // 内容 / 回收站 / 置顶 / 标签变更：整条替换。保留服务端 updatedAt，
+  // 三端才会用同一套时间戳排出完全相同的顺序。
+  (d.notes || []).forEach(n => {
+    if (!n || !n.id) return;
+      // 分项合并：回收站 / 置顶状态必须实时生效，
+      // 正文冲突才保护本地正在编辑的内容。
+      const editing = dirty && n.id === selId;
+      const cur = notes.get(n.id);
+      if (editing) {
+        const merged = mergeRemote(cur, n);
+        if (merged.changed) { notes.set(n.id, merged.note); hit = true; }
+        return;
+      }
+  });
+  if (hit) {
+    renderNav(); renderList();
+    if (selId && notes.has(selId)) {
+      $('#restoreBtn').classList.toggle('hide', !notes.get(selId).trashed);
+    }
+  }
+  flash('已同步 ' + fmt(Date.now()));
+  syncState('已保存到服务端', true);
+  // 批量变更 / 重连补偿：帧里不放全文，做一次全量拉取补齐。
+  if (d.partial || d.hello) load(true);
 }
 function connect() {
   if (es) es.close();
   es = new EventSource('/api/events' + (token ? '?token=' + encodeURIComponent(token) : ''));
   es.onopen = () => { $('#liveDot').classList.remove('off'); $('#liveTxt').textContent = '实时同步已连接'; };
-  // 任何变更事件都拉一次，不再用 d.rev !== rev 过滤：rev 恰好相等时
-  // 也可能有另一端刚写入的删除墓碑。删除先走上面的即时通道。
-  es.onmessage = e => { applyDeletedEvent(e); load(false); };
-  es.addEventListener('deleted', applyDeletedEvent);
-  // hello 带全部删除墓碑：连接/重连时补偿断线期间漏掉的删除。
-  es.addEventListener('hello', e => { applyDeletedEvent(e); load(false); });
+  es.onmessage = applyStateEvent;
+  // hello 带全部墓碑和 partial 标记：连接 / 重连时补偿断线期间的全部变更。
+  es.addEventListener('hello', applyStateEvent);
   es.onerror = () => { $('#liveDot').classList.add('off'); $('#liveTxt').textContent = '连接中断，重试中'; };
 }
 function newNote() {
@@ -559,18 +682,35 @@ function doDelete() {
   if (n.trashed) {
     confirmBox('彻底删除', '「' + titleOf(n) + '」将被永久删除，无法恢复。', () =>
       api('/api/purge', { method: 'POST', body: JSON.stringify({ id: selId }) })
-        .then(() => { notes.delete(selId); selId = null; $('#title').value = ''; $('#body').value = '';
+        .then(() => { notes.delete(selId); selId = null; clearEditor();
           renderNav(); renderList(); toast('已彻底删除'); }));
   } else {
     confirmBox('删除到回收站', '「' + titleOf(n) + '」将移入回收站，可随时还原。', () =>
       api('/api/delete', { method: 'POST', body: JSON.stringify({ id: selId }) })
-        .then(() => { n.trashed = true; renderNav(); renderList(); toast('已移入回收站'); }));
+        .then(r => {
+          n.trashed = true;
+          const st = (r && r.stamps) || {};
+          if (st[selId]) { n.updatedAt = st[selId]; notes.set(selId, n); }
+          $('#delBtn').textContent = '彻底删除';
+          $('#restoreBtn').classList.remove('hide');
+          renderNav(); renderList(); toast('已移入回收站');
+        }));
   }
 }
-function restore() {
-  if (!selId) return;
-  return api('/api/restore', { method: 'POST', body: JSON.stringify({ id: selId }) })
-    .then(() => { notes.get(selId).trashed = false; view = 'all'; renderNav(); renderList(); toast('已还原'); });
+function restore(id) {
+  const target = id || selId;
+  if (!target || !notes.has(target)) return Promise.resolve();
+  return api('/api/restore', { method: 'POST', body: JSON.stringify({ id: target }) })
+    .then(r => {
+      const n = notes.get(target); if (n) n.trashed = false;
+      // 还原后服务端会盖新的权威时间戳：本地必须同步，
+      // 否则三端的列表顺序会不一致。
+      const st = (r && r.stamps) || {};
+      if (n && st[target]) { n.updatedAt = st[target]; notes.set(target, n); }
+      selId = target; view = 'all';
+      $('#listTitle').textContent = '全部笔记';
+      renderNav(); open(target); renderList(); toast('已还原到全部笔记');
+    });
 }
 function showGallery() {
   const refs = [];
@@ -670,6 +810,28 @@ $('#left').addEventListener('click', e => {
 });
 $('#saveBtn').onclick = () => save();
 $('#delBtn').onclick = doDelete;
+$('#restoreBtn').onclick = () => restore();
+// 回收站列表项上的「恢复 / 彻底删除」按钮。用捕获阶段委托，
+// 阻止冒泡到 .item 的打开笔记动作。
+$('#list').addEventListener('click', e => {
+  const btn = e.target.closest('[data-act]');
+  if (!btn) return;
+  e.stopPropagation(); e.preventDefault();
+  const id = btn.dataset.id, n = notes.get(id);
+  if (!n) return;
+  if (btn.dataset.act === 'restore') {
+    confirmBox('恢复笔记', '「' + titleOf(n) + '」将恢复到全部笔记。', () => restore(id));
+    return;
+  }
+  if (btn.dataset.act === 'purge') {
+    confirmBox('彻底删除', '「' + titleOf(n) + '」将被永久删除，无法恢复。', () =>
+      api('/api/purge', { method: 'POST', body: JSON.stringify({ id }) })
+        .then(() => {
+          notes.delete(id); selId = null; clearEditor();
+          renderNav(); renderList(); toast('已彻底删除');
+        }));
+  }
+}, true);
 $('#pinBtn').onclick = () => {
   if (!selId) return; const n = notes.get(selId); n.pinned = !n.pinned;
   $('#pinBtn').textContent = n.pinned ? '取消置顶' : '置顶'; save(true);
@@ -700,9 +862,15 @@ $('#body').oninput = () => {
   if (previewing) renderPreview();
   clearTimeout(window._t); window._t = setTimeout(() => save(true), 1200);
 };
-$('#title').oninput = () => { dirty = true; clearTimeout(window._t); window._t = setTimeout(() => save(true), 1200); };
-$('#tagIn').oninput = () => { dirty = true; clearTimeout(window._t); window._t = setTimeout(() => save(true), 1200); };
-$('#bookIn').oninput = () => { dirty = true; clearTimeout(window._t); window._t = setTimeout(() => save(true), 1200); };
+function markEditing() {
+  dirty = true;
+  syncState('编辑中…', false);
+  clearTimeout(window._t);
+  window._t = setTimeout(() => save(true), 1200);
+}
+$('#title').oninput = markEditing;
+$('#tagIn').oninput = markEditing;
+$('#bookIn').oninput = markEditing;
 document.addEventListener('keydown', e => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); save(); }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'n') { e.preventDefault(); newNote(); }

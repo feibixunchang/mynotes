@@ -112,6 +112,15 @@ class NotesDb {
     // 老库（version 1）没有墓碑表：这里补建，保证「彻底删除」后不会被同步重新拉回。
     await _db!.execute('CREATE TABLE IF NOT EXISTS tombstones('
         'id TEXT PRIMARY KEY, deleted_at INTEGER NOT NULL)');
+    // 老库（v1.3.8 及以前）没有 dirty 列：补建。dirty 是「按笔记粒度」的
+    // 本地待推送标记 —— 同步只推真正改动过的笔记，杜绝一端的旧快照
+    // 覆盖另一端刚写入的新内容。
+    try {
+      await _db!.execute(
+          'ALTER TABLE notes ADD COLUMN dirty INTEGER NOT NULL DEFAULT 0');
+    } catch (_) {
+      // 列已存在，忽略。
+    }
     // 墓碑保留一年；服务端确认删除后会被立即清掉，这里只是防止无限增长。
     await _db!.delete('tombstones',
         where: 'deleted_at < ?',
@@ -179,7 +188,8 @@ CREATE TABLE notes(
   trashed INTEGER NOT NULL DEFAULT 0,
   trash_at INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL);
+  updated_at INTEGER NOT NULL,
+  dirty INTEGER NOT NULL DEFAULT 0);
 ''');
     await db.execute('CREATE INDEX idx_notes_book ON notes(book_id);');
     await db.execute('''
@@ -254,6 +264,73 @@ CREATE TABLE note_tags(
   // ---------- 笔记 ----------
 
   /// 新建笔记。旧版在无笔记本等情况下会静默失败（bug），这里做完整兜底，保证永远可用。
+  /// 标记这条笔记「本地已改动、待推送」。
+  /// 计算这条笔记的新 updated_at：必须严格大于旧值。
+  /// 直接用 DateTime.now() 会在同一毫秒内的连续操作（新建→删除、删除→恢复）
+  /// 拿到和上次相同的时间戳，服务端按时间戳判「没变」就把这次变更丢掉 ——
+  /// 回收站因此同步不到其它端。改为单调递增 +1，与服务端裁决逻辑一致。
+  static Future<int> _nextStamp(String id) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final rows = await _db!.query('notes',
+        columns: ['updated_at'], where: 'id = ?', whereArgs: [id], limit: 1);
+    if (rows.isEmpty) return now;
+    final old = (rows.first['updated_at'] as int?) ?? 0;
+    return old >= now ? old + 1 : now;
+  }
+
+  static Future<void> markDirty(String id) async {
+    await _db!.update('notes', {'dirty': 1}, where: 'id = ?', whereArgs: [id]);
+  }
+
+  /// 清除脏标记（服务端已确认收到该版本）。
+  static Future<void> clearDirty(Iterable<String> ids) async {
+    final list = ids.toList();
+    if (list.isEmpty) return;
+    await _db!.transaction((txn) async {
+      for (final id in list) {
+        await txn.update('notes', {'dirty': 0}, where: 'id = ?', whereArgs: [id]);
+      }
+    });
+  }
+
+  /// 本地改动过、尚未推送成功的笔记 id。
+  static Future<Set<String>> dirtyIds() async {
+    final rows = await _db!.query('notes', columns: ['id'], where: 'dirty = 1');
+    return rows.map((r) => r['id'] as String).toSet();
+  }
+
+  /// 单条笔记是否处于「本地已改动、待推送」状态。
+  /// 远端事件落地前必须查这个：内存里的脏集合只在 pull() 时刷新，
+  /// SSE 事件帧走的是另一条路径，只看内存集合会漏判，把用户刚写的内容覆盖掉。
+  static Future<bool> isDirty(String id) async {
+    final rows = await _db!.query('notes',
+        columns: ['dirty'], where: 'id = ?', whereArgs: [id], limit: 1);
+    if (rows.isEmpty) return false;
+    return (rows.first['dirty'] as int? ?? 0) == 1;
+  }
+
+  /// 应用服务端回传的权威时间戳：把本地的 updated_at 对齐到服务端，
+  /// 三端才会用同一套时间戳排出完全一致的列表顺序。
+  /// 只改时间戳，不动内容，也不清脏标记。
+  static Future<void> applyServerStamps(Map<String, dynamic> stamps) async {
+    if (stamps.isEmpty) return;
+    await _db!.transaction((txn) async {
+      for (final entry in stamps.entries) {
+        final ts = (entry.value as num?)?.toInt();
+        if (ts == null || ts <= 0) continue;
+        await txn.update('notes', {'updated_at': ts},
+            where: 'id = ?', whereArgs: [entry.key]);
+      }
+    });
+  }
+
+  /// 本地改动过、尚未推送成功的笔记。
+  static Future<List<Note>> dirtyNotes() async {
+    final rows = await _db!.rawQuery(
+        'SELECT n.*, (SELECT group_concat(t.name, char(10)) FROM note_tags nt JOIN tags t ON t.id = nt.tag_id WHERE nt.note_id = n.id) AS tags FROM notes n WHERE n.dirty = 1');
+    return rows.map(Note.fromMap).toList();
+  }
+
   static Future<Note> createNote(String? bookId) async {
     String target = bookId ?? '';
     if (target.isEmpty) {
@@ -275,7 +352,7 @@ CREATE TABLE note_tags(
     await _db!.insert('notes', {
       'id': n.id, 'book_id': n.bookId, 'title': '', 'body': '',
       'plain_text': '', 'pinned': 0, 'trashed': 0, 'trash_at': 0,
-      'created_at': now, 'updated_at': now,
+      'created_at': now, 'updated_at': now, 'dirty': 1,
     });
     return n;
   }
@@ -288,20 +365,27 @@ CREATE TABLE note_tags(
   }
 
   static Future<void> updateNote(Note n) async {
-    n.updatedAt = DateTime.now().millisecondsSinceEpoch;
+    n.updatedAt = await _nextStamp(n.id);
     await _db!.update('notes', {
       'title': n.title, 'body': n.body, 'plain_text': n.plainText,
-      'pinned': n.pinned ? 1 : 0, 'updated_at': n.updatedAt,
+      'pinned': n.pinned ? 1 : 0, 'updated_at': n.updatedAt, 'dirty': 1,
     }, where: 'id = ?', whereArgs: [n.id]);
   }
 
   static Future<void> softDelete(String id) async {
-    final now = DateTime.now().millisecondsSinceEpoch;
-    await _db!.update('notes', {'trashed': 1, 'trash_at': now}, where: 'id = ?', whereArgs: [id]);
+    final now = await _nextStamp(id);
+    // 必须同时推进 updated_at：否则远端按时间戳判断「这条没变」，
+    // 移入回收站 / 恢复就永远同步不到其它端。
+    await _db!.update('notes',
+        {'trashed': 1, 'trash_at': now, 'updated_at': now, 'dirty': 1},
+        where: 'id = ?', whereArgs: [id]);
   }
 
   static Future<void> restore(String id) async {
-    await _db!.update('notes', {'trashed': 0, 'trash_at': 0}, where: 'id = ?', whereArgs: [id]);
+    final now = await _nextStamp(id);
+    await _db!.update('notes',
+        {'trashed': 0, 'trash_at': 0, 'updated_at': now, 'dirty': 1},
+        where: 'id = ?', whereArgs: [id]);
   }
 
   /// 永久删除：先写墓碑再删笔记，防止 NAS 服务端把旧笔记同步回来。
@@ -378,7 +462,9 @@ CREATE TABLE note_tags(
   }
 
   static Future<void> moveNote(String id, String bookId) async {
-    await _db!.update('notes', {'book_id': bookId, 'updated_at': DateTime.now().millisecondsSinceEpoch},
+    final now = await _nextStamp(id);
+    await _db!.update('notes',
+        {'book_id': bookId, 'updated_at': now, 'dirty': 1},
         where: 'id = ?', whereArgs: [id]);
   }
 
@@ -391,7 +477,7 @@ CREATE TABLE note_tags(
       sql += ' AND n.book_id = ?';
       args.add(bookId);
     }
-    sql += ' ORDER BY n.pinned DESC, n.updated_at DESC';
+    sql += ' ORDER BY n.pinned DESC, n.updated_at DESC, n.id ASC';
     final rows = await _db!.rawQuery(sql, args);
     return rows.map(Note.fromMap).toList();
   }
@@ -399,7 +485,7 @@ CREATE TABLE note_tags(
   static Future<List<Note>> searchNotes(String q) async {
     final like = '%$q%';
     final rows = await _db!.rawQuery(
-      'SELECT n.*, (SELECT group_concat(t.name, char(10)) FROM note_tags nt JOIN tags t ON t.id = nt.tag_id WHERE nt.note_id = n.id) AS tags FROM notes n WHERE n.trashed = 0 AND (n.title LIKE ? OR n.plain_text LIKE ?) ORDER BY n.pinned DESC, n.updated_at DESC',
+      'SELECT n.*, (SELECT group_concat(t.name, char(10)) FROM note_tags nt JOIN tags t ON t.id = nt.tag_id WHERE nt.note_id = n.id) AS tags FROM notes n WHERE n.trashed = 0 AND (n.title LIKE ? OR n.plain_text LIKE ?) ORDER BY n.pinned DESC, n.updated_at DESC, n.id ASC',
       [like, like]);
     return rows.map(Note.fromMap).toList();
   }
@@ -438,11 +524,16 @@ CREATE TABLE note_tags(
         await txn.insert('note_tags', {'note_id': noteId, 'tag_id': tid});
       }
     });
+    // 标签参与服务端内容比较，不打脏标记就同步不过去。
+    // 同时推进 updated_at：否则三端排序仍会不一致。
+    final now = await _nextStamp(noteId);
+    await _db!.update('notes', {'updated_at': now, 'dirty': 1},
+        where: 'id = ?', whereArgs: [noteId]);
   }
 
   static Future<List<Note>> notesWithTag(String tagId) async {
     final rows = await _db!.rawQuery(
-      'SELECT n.*, (SELECT group_concat(t.name, char(10)) FROM note_tags nt JOIN tags t ON t.id = nt.tag_id WHERE nt.note_id = n.id) AS tags FROM notes n JOIN note_tags nt ON nt.note_id = n.id WHERE n.trashed = 0 AND nt.tag_id = ? ORDER BY n.pinned DESC, n.updated_at DESC',
+      'SELECT n.*, (SELECT group_concat(t.name, char(10)) FROM note_tags nt JOIN tags t ON t.id = nt.tag_id WHERE nt.note_id = n.id) AS tags FROM notes n JOIN note_tags nt ON nt.note_id = n.id WHERE n.trashed = 0 AND nt.tag_id = ? ORDER BY n.pinned DESC, n.updated_at DESC, n.id ASC',
       [tagId]);
     return rows.map(Note.fromMap).toList();
   }
@@ -467,12 +558,13 @@ CREATE TABLE note_tags(
     return '';
   }
 
-  /// 导入一条（来自 Simplenote JSON 或远端快照）
-  static Future<Note> importOne(Map item, {String? bookId}) async {
-    String target = bookId ?? (item['bookId'] as String?) ?? '';
-    // 远端 bookId 可能是笔记本名称（网页版），按名称找/建
+  /// 解析远端 bookId：可能是本地笔记本 id，也可能是网页版写的名称。
+  static Future<String> _resolveBookId(String raw) async {
+    var target = raw;
     if (target.isNotEmpty && (await getBook(target)) == null) {
-      final byName = (await listBooks()).where((b) => b.name == target && b.kind == 'notebook').toList();
+      final byName = (await listBooks())
+          .where((b) => b.name == target && b.kind == 'notebook')
+          .toList();
       if (byName.isNotEmpty) {
         target = byName.first.id;
       } else {
@@ -480,49 +572,126 @@ CREATE TABLE note_tags(
       }
     }
     if (target.isEmpty) {
-      final root = await _db!.rawQuery(
+      var root = await _db!.rawQuery(
           "SELECT id FROM books WHERE parent_id IS NULL AND kind = 'notebook' ORDER BY name LIMIT 1");
       if (root.isEmpty) {
         await createBook('我的笔记本', null, 'notebook');
+        root = await _db!.rawQuery(
+            "SELECT id FROM books WHERE parent_id IS NULL AND kind = 'notebook' ORDER BY name LIMIT 1");
       }
-      final again = await _db!.rawQuery(
-          "SELECT id FROM books WHERE kind = 'notebook' ORDER BY name LIMIT 1");
+      final again = root.isNotEmpty
+          ? root
+          : await _db!.rawQuery(
+              "SELECT id FROM books WHERE kind = 'notebook' ORDER BY name LIMIT 1");
       target = again.first['id'] as String;
     }
+    return target;
+  }
+
+  /// 解析远端传来的笔记本名称 → 本地笔记本 id（找不到就按同名新建）。
+  static Future<String> resolveBookId(String raw) => _resolveBookId(raw);
+
+  /// 只落地远端的「状态」字段：回收站 / 置顶 / 笔记本 / 时间戳。
+  ///
+  /// 用途：本地这条笔记还有未推送的编辑（正文冲突）时，正文必须保护，
+  /// 但回收站状态必须立刻跟随远端 —— 否则「另一端把笔记删了，
+  /// 这端还躺在正常列表里」就永远修不好。
+  /// 脏标记保留：本地正文还没上推，下次 push 仍要带上。
+  static Future<void> applyRemoteState(
+    String id, {
+    required bool trashed,
+    required bool pinned,
+    String bookId = '',
+    int updatedAt = 0,
+  }) async {
+    if (id.isEmpty) return;
+    final values = <String, Object?>{
+      'trashed': trashed ? 1 : 0,
+      'pinned': pinned ? 1 : 0,
+    };
+    if (trashed) {
+      values['trash_at'] = DateTime.now().millisecondsSinceEpoch;
+    }
+    if (bookId.isNotEmpty) {
+      values['book_id'] = await _resolveBookId(bookId);
+    }
+    if (updatedAt > 0) {
+      values['updated_at'] = updatedAt;
+    }
+    if (values.isEmpty) return;
+    await _db!.update('notes', values, where: 'id = ?', whereArgs: [id]);
+  }
+
+  /// 按服务端快照整条落地（新增或更新），写入全部字段。
+  ///
+  /// 必须与本地编辑用的 updateNote() 分开：updateNote() 会把 updated_at
+  /// 刷成本机时间，用在同步路径上会让三端时间戳各自漂移、列表顺序永远
+  /// 对不上；这里保留服务端的权威 updatedAt。同时必须写 trashed —— 以前
+  /// applyRemote / importOne 缺了它，另一端「移入回收站 / 恢复」永远同步不过来。
+  static Future<int> applyRemoteSnapshot(Map item,
+      {String? bookIdOverride,
+      bool keepDirty = false,
+      bool? forceTrashed}) async {
+    final id = (item['id'] as String?) ?? '';
+    if (id.isEmpty) return 0;
     final now = DateTime.now().millisecondsSinceEpoch;
-    final id = (item['id'] as String?) ?? newId();
     final content = (item['content'] ?? item['body'] ?? '') as String;
     var title = (item['title'] ?? '') as String;
     if (title.isEmpty) title = deriveTitle(content);
     final created = (item['createdAt'] as num?)?.toInt() ?? now;
     final updated = (item['updatedAt'] as num?)?.toInt() ?? now;
-    final trashed = item['trashed'] == true ? 1 : 0;
+    final trashed =
+        forceTrashed != null ? (forceTrashed ? 1 : 0) : (item['trashed'] == true ? 1 : 0);
+    final pinned = item['pinned'] == true ? 1 : 0;
 
     final existing = await getNoteById(id);
-    if (existing != null) {
-      existing.title = title;
-      existing.body = content;
-      existing.plainText = markdownToPlainText(content);
-      existing.pinned = item['pinned'] == true;
-      existing.updatedAt = updated;
-      await updateNote(existing);
-      await _applyTagNames(id, item['tags']);
-      return existing;
+    // 远端传的是笔记本名称，本地存的是笔记本 id：必须解析后写入。
+    // 以前直接沿用 existing.bookId，远端把笔记移到别的笔记本后，
+    // 本端永远不会跟着变 —— 三端列表因此对不上。
+    String bookId = bookIdOverride ?? '';
+    if (bookId.isEmpty) {
+      final raw = (item['bookId'] as String?) ?? '';
+      bookId = raw.isNotEmpty
+          ? await _resolveBookId(raw)
+          : (existing?.bookId ?? await _resolveBookId(''));
     }
-
-    await _db!.insert('notes', {
-      'id': id,
-      'book_id': target,
+    final values = <String, Object?>{
       'title': title,
       'body': content,
       'plain_text': markdownToPlainText(content),
-      'pinned': item['pinned'] == true ? 1 : 0,
+      'pinned': pinned,
       'trashed': trashed,
       'trash_at': trashed == 1 ? now : 0,
-      'created_at': created,
       'updated_at': updated,
-    });
+      // 以远端版本为准：本地不再有待推送的改动。
+      // keepDirty=true 用于「分项合并」：本地正文被保护、尚未推送，
+      // 脏标记必须留着，否则这次编辑永远上不去了。
+      'dirty': keepDirty ? 1 : 0,
+    };
+    if (existing == null) {
+      await _db!.insert('notes', {
+        'id': id,
+        'book_id': bookId,
+        'created_at': created,
+        ...values,
+      });
+    } else {
+      await _db!.update('notes', values, where: 'id = ?', whereArgs: [id]);
+    }
     await _applyTagNames(id, item['tags']);
+    return 1;
+  }
+
+  /// 导入一条（来自 Simplenote JSON 或远端快照）
+  static Future<Note> importOne(Map item, {String? bookId}) async {
+    final target = await _resolveBookId(bookId ?? (item['bookId'] as String?) ?? '');
+    final id = (item['id'] as String?) ?? newId();
+    final data = Map<String, dynamic>.from(item);
+    data['id'] = id;
+    await applyRemoteSnapshot(data, bookIdOverride: target);
+    // 本地导入的内容要推给其它端（applyRemoteSnapshot 内部会清脏标记，
+    // 所以导入完成后再补上）。
+    await markDirty(id);
     return (await getNoteById(id))!;
   }
 
@@ -538,19 +707,9 @@ CREATE TABLE note_tags(
     if (ids.isNotEmpty) await setTags(noteId, ids);
   }
 
-  /// 远端较新时覆盖本地
+  /// 远端较新时覆盖本地（保留签名兼容同步层与回归测试）
   static Future<void> applyRemote(Note local, Map item) async {
-    final content = (item['content'] ?? item['body'] ?? '') as String;
-    var title = (item['title'] ?? '') as String;
-    if (title.isEmpty) title = deriveTitle(content);
-    local.title = title;
-    local.body = content;
-    local.plainText = markdownToPlainText(content);
-    local.pinned = item['pinned'] == true;
-    local.updatedAt = (item['updatedAt'] as num?)?.toInt() ??
-        DateTime.now().millisecondsSinceEpoch;
-    await updateNote(local);
-    await _applyTagNames(local.id, item['tags']);
+    await applyRemoteSnapshot(item);
   }
 
   static Future<Note?> getNoteById(String id) => getNote(id);
