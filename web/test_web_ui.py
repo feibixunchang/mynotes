@@ -272,6 +272,43 @@ def main():
         check("服务端回收站状态与网页版一致",
               sum(1 for n in notes if n.get("trashed")) >= 0)
 
+        # --- 4b. 实时性：NAS 端变更后，网页版 UI 自动更新（不刷新页面）---
+        # 记录当前首屏列表里的第一条笔记
+        before_first = cdp.eval("""(function(){
+            const it = document.querySelector('#list .item');
+            return it ? (it.dataset.id || '') : '';
+        })()""")
+        # 在 NAS 端新建一条笔记
+        import urllib.request as _u
+        nid_live = "webui-live-%d" % int(time.time())
+        req = _u.Request("http://192.168.31.3:2581/api/note",
+                         data=json.dumps({"note": {"id": nid_live,
+                                                   "title": "网页版实时验证",
+                                                   "content": "SSE 推送验证"}}).encode(),
+                         headers={"Content-Type": "application/json"}, method="POST")
+        _u.urlopen(req, timeout=20).read()
+        # 不刷新页面，等 SSE 把它推过来
+        got = False
+        for _ in range(25):
+            time.sleep(0.4)
+            hit = cdp.eval("""(function(){
+                const it = document.querySelector('#list .item');
+                if (!it) return '';
+                const t = (it.textContent || '');
+                return t.includes('网页版实时验证') ? 'HIT' : '';
+            })()""")
+            if hit == 'HIT':
+                got = True
+                break
+        check("NAS 端新建后网页版自动刷新（无需手动刷新）", got,
+              "笔记 id=%s" % nid_live)
+        # 清理
+        req2 = _u.Request("http://192.168.31.3:2581/api/purge",
+                          data=json.dumps({"id": nid_live}).encode(),
+                          headers={"Content-Type": "application/json"}, method="POST")
+        _u.urlopen(req2, timeout=20).read()
+        time.sleep(1.0)
+
         # --- 5. 状态栏文案语义 ---
         r = cdp.eval("""({
             syncState: document.getElementById('syncState').textContent.trim(),

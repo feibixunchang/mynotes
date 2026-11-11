@@ -640,6 +640,15 @@ function applyStateEvent(e) {
         if (merged.changed) { notes.set(n.id, merged.note); hit = true; }
         return;
       }
+      // 非编辑状态：直接采用远端版本。
+      // 这里以前漏了 else 分支 —— 结果是 SSE 帧里带来的笔记**一条都没落地**：
+      // 「NAS 端改了内容，网页版列表纹丝不动」，只有手动刷新才会更新。
+      // load() 那条路径有 notes.set()，SSE 这条路径没有，两边行为不一致。
+      const merged = mergeRemote(cur, n);
+      if (!cur || merged.changed) {
+        notes.set(n.id, merged.note);
+        hit = true;
+      }
   });
   if (hit) {
     renderNav(); renderList();
