@@ -1,18 +1,18 @@
 {
-  "tag_name": "v1.3.7",
-  "version": "1.3.7",
+  "tag_name": "v1.3.8",
+  "version": "1.3.8",
   "assets": [
     {
-      "name": "MyNotes-1.3.7-macOS.dmg",
-      "browser_download_url": "https://github.com/feibixunchang/mynotes/releases/download/v1.3.7/MyNotes-1.3.7-macOS.dmg",
-      "size": 23540631,
-      "digest": "sha256:61302f58186a846dae256c5bbc92054f6cb5ff223280c19199c05de0fb38b373"
+      "name": "MyNotes-1.3.8-macOS.dmg",
+      "browser_download_url": "https://github.com/feibixunchang/mynotes/releases/download/v1.3.8/MyNotes-1.3.8-macOS.dmg",
+      "size": 23553728,
+      "digest": "sha256:e95e68ac23303490643022a729d54cd096cc72cae361f192ecf79856f500ecc6"
     },
     {
-      "name": "mynotes-1.3.7-windows-x64-portable-clean.zip",
-      "browser_download_url": "https://github.com/feibixunchang/mynotes/releases/download/v1.3.7/mynotes-1.3.7-windows-x64-portable-clean.zip",
-      "size": 14249297,
-      "digest": "sha256:b2ad1bd643c4198b99e86b520d68c4ff86582e62be7b3ea502d8f4fe1b29a97b"
+      "name": "mynotes-1.3.8-windows-x64-portable-clean.zip",
+      "browser_download_url": "https://github.com/feibixunchang/mynotes/releases/download/v1.3.8/mynotes-1.3.8-windows-x64-portable-clean.zip",
+      "size": 14253807,
+      "digest": "sha256:eece51a12f4a0391dec94b1f6949672637ab7245df8555782247561aeec6e093"
     }
   ]
 }
